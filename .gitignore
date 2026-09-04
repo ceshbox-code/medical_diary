@@ -1,16 +1,17 @@
-# Secrets
+# Секреты и конфигурация
 .env
 .env.local
+.env.*.local
+!.env.example
 
-# Database
-data/*.db
+# База данных и бэкапы (НИКОГДА не коммитим медицинские данные)
 *.db
 *.sqlite
+*.sqlite3
+data/
+backups/
 
-# Backups
-backups/*.db
-
-# Python
+# Python кэш
 __pycache__/
 *.pyc
 *.pyo
@@ -18,28 +19,19 @@ __pycache__/
 .Python
 env/
 venv/
-.venv/
 
-# Logs
+# Логи и бэкапы конфигов
 *.log
-logs/
-
-# Backup files
 *.bak.*
 
-# Synology
+# Системные файлы Synology и Windows
 @eaDir/
 Thumbs.db
-static/Thumbs.db
-static/@eaDir/
-
-# OS
 .DS_Store
 ._*
 
-# IDE
-.vscode/
+# Настройки IDE
 .idea/
+.vscode/
 *.swp
 *.swo
-*~
