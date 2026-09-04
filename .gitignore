@@ -1,0 +1,45 @@
+# Secrets
+.env
+.env.local
+
+# Database
+data/*.db
+*.db
+*.sqlite
+
+# Backups
+backups/*.db
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+
+# Logs
+*.log
+logs/
+
+# Backup files
+*.bak.*
+
+# Synology
+@eaDir/
+Thumbs.db
+static/Thumbs.db
+static/@eaDir/
+
+# OS
+.DS_Store
+._*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
