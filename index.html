@@ -1,0 +1,644 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <title>Medical Diary — медицинский дневник</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Medical Diary — мобильный веб-сервис медицинского дневника для учёта глюкозы, давления, пульса, питания и экспорта данных в PDF.">
+  <meta name="theme-color" content="#2563eb">
+
+  <style>
+    :root {
+      --bg: #f8fafc;
+      --card: #ffffff;
+      --text: #0f172a;
+      --muted: #475569;
+      --primary: #2563eb;
+      --primary-dark: #1d4ed8;
+      --border: #e2e8f0;
+      --code-bg: #0f172a;
+      --code-text: #e5e7eb;
+      --success: #16a34a;
+      --warning: #ca8a04;
+      --danger: #dc2626;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+    }
+
+    header {
+      background: linear-gradient(135deg, #2563eb, #0f172a);
+      color: white;
+      padding: 56px 20px;
+      text-align: center;
+    }
+
+    header h1 {
+      margin: 0 0 12px;
+      font-size: clamp(32px, 7vw, 56px);
+      line-height: 1.1;
+    }
+
+    header p {
+      margin: 0 auto;
+      max-width: 780px;
+      font-size: 18px;
+      color: #dbeafe;
+    }
+
+    nav {
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      background: rgba(255,255,255,0.95);
+      backdrop-filter: blur(10px);
+      border-bottom: 1px solid var(--border);
+      overflow-x: auto;
+      white-space: nowrap;
+    }
+
+    nav .inner {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 10px 16px;
+    }
+
+    nav a {
+      display: inline-block;
+      color: var(--primary);
+      text-decoration: none;
+      font-weight: 600;
+      margin-right: 18px;
+      font-size: 15px;
+    }
+
+    main {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 28px 16px 80px;
+    }
+
+    section {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      padding: 24px;
+      margin: 18px 0;
+      box-shadow: 0 10px 30px rgba(15, 23, 42, 0.04);
+    }
+
+    h2 {
+      margin-top: 0;
+      font-size: 28px;
+      line-height: 1.2;
+    }
+
+    h3 {
+      margin-top: 26px;
+      font-size: 21px;
+    }
+
+    p {
+      color: var(--muted);
+    }
+
+    ul, ol {
+      color: var(--muted);
+      padding-left: 22px;
+    }
+
+    li {
+      margin: 6px 0;
+    }
+
+    .hero-actions {
+      margin-top: 26px;
+    }
+
+    .button {
+      display: inline-block;
+      background: var(--primary);
+      color: white;
+      padding: 13px 18px;
+      border-radius: 12px;
+      text-decoration: none;
+      font-weight: 700;
+      margin: 6px;
+    }
+
+    .button.secondary {
+      background: white;
+      color: var(--primary);
+      border: 1px solid #bfdbfe;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 14px;
+    }
+
+    .feature {
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 16px;
+      background: #f8fafc;
+    }
+
+    .feature strong {
+      display: block;
+      color: var(--text);
+      margin-bottom: 6px;
+    }
+
+    code {
+      background: #e2e8f0;
+      padding: 2px 6px;
+      border-radius: 6px;
+      color: #111827;
+    }
+
+    pre {
+      background: var(--code-bg);
+      color: var(--code-text);
+      padding: 16px;
+      border-radius: 14px;
+      overflow-x: auto;
+      font-size: 14px;
+      line-height: 1.45;
+    }
+
+    pre code {
+      background: transparent;
+      color: inherit;
+      padding: 0;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 14px 0;
+      overflow: hidden;
+      border-radius: 12px;
+    }
+
+    th, td {
+      border: 1px solid var(--border);
+      padding: 10px;
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      background: #eff6ff;
+      color: #1e3a8a;
+    }
+
+    .note {
+      border-left: 5px solid var(--primary);
+      background: #eff6ff;
+      padding: 14px 16px;
+      border-radius: 10px;
+      color: #1e3a8a;
+    }
+
+    .warning {
+      border-left: 5px solid var(--warning);
+      background: #fefce8;
+      padding: 14px 16px;
+      border-radius: 10px;
+      color: #713f12;
+    }
+
+    .danger {
+      border-left: 5px solid var(--danger);
+      background: #fef2f2;
+      padding: 14px 16px;
+      border-radius: 10px;
+      color: #7f1d1d;
+    }
+
+    footer {
+      text-align: center;
+      padding: 30px 16px;
+      color: var(--muted);
+      border-top: 1px solid var(--border);
+    }
+
+    @media (max-width: 640px) {
+      header {
+        padding: 42px 16px;
+      }
+
+      section {
+        padding: 18px;
+        border-radius: 14px;
+      }
+
+      .button {
+        display: block;
+        text-align: center;
+        margin: 8px 0;
+      }
+
+      table {
+        font-size: 14px;
+      }
+    }
+  </style>
+</head>
+
+<body>
+  <header>
+    <h1>Medical Diary</h1>
+    <p>
+      Мобильный веб-сервис медицинского дневника для учёта глюкозы,
+      давления, пульса, питания и экспорта данных в PDF.
+    </p>
+    <div class="hero-actions">
+      <a class="button" href="https://github.com/ceshbox-code/medical_diary">Открыть GitHub</a>
+      <a class="button secondary" href="#install">Инструкция по установке</a>
+    </div>
+  </header>
+
+  <nav>
+    <div class="inner">
+      <a href="#about">О проекте</a>
+      <a href="#features">Возможности</a>
+      <a href="#architecture">Архитектура</a>
+      <a href="#install">Установка</a>
+      <a href="#synology">Synology</a>
+      <a href="#usage">Использование</a>
+      <a href="#backup">Бэкапы</a>
+      <a href="#security">Безопасность</a>
+    </div>
+  </nav>
+
+  <main>
+    <section id="about">
+      <h2>О проекте</h2>
+      <p>
+        <strong>Medical Diary</strong> — это self-hosted медицинский дневник,
+        рассчитанный на мобильное использование с iPhone.
+      </p>
+      <p>
+        Пользователь может несколько раз в день быстро вносить показатели:
+        глюкозу крови натощак и после еды, артериальное давление, пульс,
+        а также съеденные продукты с точным количеством.
+      </p>
+      <p>
+        Каждая запись сохраняется в базе данных с датой и точным временем.
+        Для врача можно сформировать PDF-отчёт за выбранный период.
+      </p>
+
+      <div class="warning">
+        Этот проект не заменяет консультацию врача. Он предназначен для личного
+        учёта и подготовки данных для обсуждения со специалистом.
+      </div>
+    </section>
+
+    <section id="features">
+      <h2>Возможности</h2>
+
+      <div class="grid">
+        <div class="feature">
+          <strong>Mobile-first</strong>
+          Интерфейс адаптирован под iPhone и Safari: крупные элементы, минимум действий.
+        </div>
+
+        <div class="feature">
+          <strong>Глюкоза</strong>
+          Учёт значений натощак и после еды в ммоль/л.
+        </div>
+
+        <div class="feature">
+          <strong>Давление и пульс</strong>
+          Быстрое внесение систолического, диастолического давления и пульса.
+        </div>
+
+        <div class="feature">
+          <strong>Питание</strong>
+          Записи продуктов с количеством и единицами измерения.
+        </div>
+
+        <div class="feature">
+          <strong>История</strong>
+          Просмотр и фильтрация записей по датам.
+        </div>
+
+        <div class="feature">
+          <strong>PDF-экспорт</strong>
+          Создание отчёта за выбранный период для печати или отправки врачу.
+        </div>
+
+        <div class="feature">
+          <strong>Docker</strong>
+          Запуск в контейнере на Synology или Linux-сервере.
+        </div>
+
+        <div class="feature">
+          <strong>Бэкапы</strong>
+          Резервное копирование SQLite базы данных.
+        </div>
+      </div>
+    </section>
+
+    <section id="architecture">
+      <h2>Архитектура</h2>
+
+      <p>Текущая рабочая версия использует SQLite базу данных.</p>
+
+      <pre><code>Browser / iPhone Safari
+        |
+        v
+Flask + Gunicorn Docker container
+        |
+        v
+SQLite database in persistent volume</code></pre>
+
+      <table>
+        <thead>
+          <tr>
+            <th>Файл</th>
+            <th>Назначение</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>app.py</code></td>
+            <td>Основное Flask-приложение</td>
+          </tr>
+          <tr>
+            <td><code>backup.py</code></td>
+            <td>Создание резервной копии SQLite базы</td>
+          </tr>
+          <tr>
+            <td><code>Dockerfile</code></td>
+            <td>Сборка Docker-образа</td>
+          </tr>
+          <tr>
+            <td><code>docker-compose.yml</code></td>
+            <td>Запуск контейнера приложения</td>
+          </tr>
+          <tr>
+            <td><code>data/</code></td>
+            <td>Постоянное хранилище базы данных</td>
+          </tr>
+          <tr>
+            <td><code>backups/</code></td>
+            <td>Резервные копии</td>
+          </tr>
+          <tr>
+            <td><code>launcher.sh</code></td>
+            <td>Единый стартовый скрипт установки и управления</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="note">
+        MySQL в текущей рабочей версии не используется. Основная база — SQLite:
+        <code>data/medical_diary.db</code>.
+      </div>
+    </section>
+
+    <section id="install">
+      <h2>Быстрая установка</h2>
+
+      <h3>1. Клонировать репозиторий</h3>
+
+      <pre><code>git clone https://github.com/ceshbox-code/medical_diary.git
+cd medical_diary</code></pre>
+
+      <h3>2. Запустить единый стартовый скрипт</h3>
+
+      <pre><code>chmod +x launcher.sh
+./launcher.sh</code></pre>
+
+      <p>Скрипт предложит выбрать язык:</p>
+
+      <pre><code>1) Русский
+2) English</code></pre>
+
+      <p>Затем появится меню управления:</p>
+
+      <pre><code>1) Развернуть приложение
+2) Запустить контейнеры
+3) Перезапустить контейнеры
+4) Остановить контейнеры
+5) Показать статус
+6) Показать логи
+7) Создать резервную копию
+8) Восстановить из копии
+9) Обновить до последней версии
+0) Выход</code></pre>
+
+      <p>Для первой установки выберите пункт:</p>
+
+      <pre><code>1) Развернуть приложение</code></pre>
+    </section>
+
+    <section id="manual">
+      <h2>Ручной запуск без launcher.sh</h2>
+
+      <h3>1. Создать файл настроек</h3>
+
+      <pre><code>cp .env.example .env</code></pre>
+
+      <p>Пример настроек:</p>
+
+      <pre><code>SECRET_KEY=replace_with_long_random_secret
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=change_me
+HTTP_PORT=8000
+TZ=Europe/Moscow
+SESSION_COOKIE_SECURE=false
+WA_RP_ID=localhost
+WA_ORIGIN=http://localhost:8000
+DATABASE_PATH=/data/medical_diary.db</code></pre>
+
+      <h3>2. Создать директории</h3>
+
+      <pre><code>mkdir -p data backups</code></pre>
+
+      <h3>3. Собрать и запустить Docker-контейнер</h3>
+
+      <pre><code>docker compose build
+docker compose up -d</code></pre>
+
+      <h3>4. Открыть приложение</h3>
+
+      <pre><code>http://localhost:8000</code></pre>
+    </section>
+
+    <section id="synology">
+      <h2>Установка на Synology</h2>
+
+      <p>На Synology должен быть установлен пакет <strong>Container Manager</strong>.</p>
+
+      <pre><code>ssh root@YOUR_SYNOLOGY_HOST
+cd /volume1/docker
+
+git clone https://github.com/ceshbox-code/medical_diary.git
+cd medical_diary
+
+chmod +x launcher.sh
+./launcher.sh</code></pre>
+
+      <p>После запуска выберите:</p>
+
+      <pre><code>1) Русский
+1) Развернуть приложение</code></pre>
+
+      <h3>Reverse Proxy на Synology</h3>
+
+      <p>Рекомендуется открыть приложение через HTTPS-домен.</p>
+
+      <table>
+        <thead>
+          <tr>
+            <th>Параметр</th>
+            <th>Значение</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Source protocol</td>
+            <td>HTTPS</td>
+          </tr>
+          <tr>
+            <td>Source hostname</td>
+            <td>diary.example.com</td>
+          </tr>
+          <tr>
+            <td>Source port</td>
+            <td>443</td>
+          </tr>
+          <tr>
+            <td>Destination protocol</td>
+            <td>HTTP</td>
+          </tr>
+          <tr>
+            <td>Destination hostname</td>
+            <td>localhost</td>
+          </tr>
+          <tr>
+            <td>Destination port</td>
+            <td>8000</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <p>Для HTTPS в <code>.env</code> установите:</p>
+
+      <pre><code>SESSION_COOKIE_SECURE=true
+WA_RP_ID=diary.example.com
+WA_ORIGIN=https://diary.example.com</code></pre>
+    </section>
+
+    <section id="usage">
+      <h2>Использование</h2>
+
+      <ol>
+        <li>Откройте приложение в Safari на iPhone.</li>
+        <li>Войдите под учётной записью администратора.</li>
+        <li>Добавляйте значения глюкозы, давления, пульса и питания.</li>
+        <li>Используйте историю и фильтры по датам.</li>
+        <li>Формируйте PDF-отчёт за нужный период.</li>
+        <li>Передавайте PDF врачу при необходимости.</li>
+      </ol>
+
+      <h3>Проверка статуса</h3>
+
+      <pre><code>docker compose ps</code></pre>
+
+      <h3>Просмотр логов</h3>
+
+      <pre><code>docker compose logs -f</code></pre>
+
+      <h3>Healthcheck</h3>
+
+      <pre><code>curl http://localhost:8000/health</code></pre>
+    </section>
+
+    <section id="backup">
+      <h2>Резервное копирование и восстановление</h2>
+
+      <h3>Создать бэкап через launcher</h3>
+
+      <pre><code>./launcher.sh</code></pre>
+
+      <p>Затем выбрать:</p>
+
+      <pre><code>7) Создать резервную копию</code></pre>
+
+      <h3>Создать бэкап вручную</h3>
+
+      <pre><code>./scripts/backup.sh</code></pre>
+
+      <h3>Восстановить базу вручную</h3>
+
+      <pre><code>docker compose down
+cp backups/medical_diary_YYYYMMDD_HHMMSS.db data/medical_diary.db
+docker compose up -d</code></pre>
+
+      <div class="warning">
+        Перед восстановлением рекомендуется сохранить текущую базу отдельной резервной копией.
+      </div>
+    </section>
+
+    <section id="security">
+      <h2>Безопасность</h2>
+
+      <p>Проект работает с чувствительными медицинскими данными, поэтому важно соблюдать правила безопасности.</p>
+
+      <ul>
+        <li>Не публикуйте <code>.env</code>.</li>
+        <li>Не публикуйте <code>data/medical_diary.db</code>.</li>
+        <li>Не публикуйте файлы из <code>backups/</code>.</li>
+        <li>Используйте сложный пароль администратора.</li>
+        <li>Используйте HTTPS для внешнего доступа.</li>
+        <li>Регулярно делайте резервные копии.</li>
+        <li>Храните внешнюю копию бэкапов отдельно от сервера.</li>
+        <li>На Synology используйте шифрование папки или тома, если это возможно.</li>
+      </ul>
+
+      <div class="danger">
+        Медицинские данные не должны попадать в публичный GitHub-репозиторий.
+        Проверьте, что <code>.gitignore</code> исключает <code>.env</code>, <code>*.db</code>,
+        <code>data/</code> и <code>backups/</code>.
+      </div>
+    </section>
+
+    <section id="github-pages">
+      <h2>GitHub Pages</h2>
+
+      <p>Эта страница должна быть доступна по адресу:</p>
+
+      <pre><code>https://ceshbox-code.github.io/medical_diary/index.html</code></pre>
+
+      <p>Если страница не открывается, включите GitHub Pages:</p>
+
+      <pre><code>Repository → Settings → Pages
+Source: Deploy from a branch
+Branch: main
+Folder: / root
+Save</code></pre>
+    </section>
+  </main>
+
+  <footer>
+    <p>
+      Medical Diary · Self-hosted medical tracking app · MIT License
+    </p>
+  </footer>
+</body>
+</html>
