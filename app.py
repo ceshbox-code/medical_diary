@@ -128,6 +128,7 @@ REF_RANGES = {
 }
 
 STATUS_COLORS = {"low": "#fff3c4", "ok": "#d9f2d9", "high": "#fbd9d9"}
+DEFAULT_SETTINGS = {"glucose": True, "vitals": True, "food": True}
 
 
 def status_of(value, low, high):
@@ -273,6 +274,7 @@ CREATE TABLE IF NOT EXISTS users (
   display_name TEXT,
   status TEXT NOT NULL DEFAULT 'active',
   is_admin INTEGER NOT NULL DEFAULT 0,
+  settings_json TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -395,6 +397,8 @@ def init_db():
     cols = [r[1] for r in conn.execute("PRAGMA table_info(users)").fetchall()]
     if "is_admin" not in cols:
         conn.execute("ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0")
+    if "settings_json" not in cols:
+        conn.execute("ALTER TABLE users ADD COLUMN settings_json TEXT")
 
     # Пользователь из ADMIN_USERNAME всегда получает права администратора
     # при каждом старте приложения. Это намеренный механизм восстановления
@@ -701,12 +705,21 @@ def dashboard():
     if "csrf_token" not in session:
         session["csrf_token"] = secrets.token_hex(32)
 
+    db = get_db()
+    srow = db.execute("SELECT settings_json FROM users WHERE id = ?", (session["user_id"],)).fetchone()
+    settings = dict(DEFAULT_SETTINGS)
+    if srow and srow["settings_json"]:
+        try:
+            settings.update(json.loads(srow["settings_json"]))
+        except Exception:
+            settings = dict(DEFAULT_SETTINGS)
     return render_template_string(
         APP_HTML,
         csrf_token=session["csrf_token"],
         display_name=session.get("display_name") or session.get("username", ""),
         is_admin=1 if session.get("is_admin") else 0,
         user_id=session.get("user_id", 0),
+        settings_json=json.dumps(settings),
     )
 
 
@@ -887,6 +900,7 @@ def query_entries(user_id, date_from=None, date_to=None, entry_type="all", sort=
                     "type": "glucose",
                     "type_label": "Глюкоза",
                     "measured_at": r["measured_at"],
+                "measured_at_ru": format_dt_ru(r["measured_at"]),
                     "display": f"{val:.1f} ммоль/л ({glucose_type_label})",
                     "display_html": f'<span class="st-{st}">{val:.1f}</span> ммоль/л ({glucose_type_label})',
                     "display_pdf": f'<font backcolor="{STATUS_COLORS[st]}">{val:.1f}</font> ммоль/л ({glucose_type_label})',
@@ -932,6 +946,7 @@ def query_entries(user_id, date_from=None, date_to=None, entry_type="all", sort=
                     "type": "vitals",
                     "type_label": "Давление/пульс",
                     "measured_at": r["measured_at"],
+                "measured_at_ru": format_dt_ru(r["measured_at"]),
                     "display": display,
                     "display_html": display_html,
                     "display_pdf": display_pdf,
@@ -964,6 +979,7 @@ def query_entries(user_id, date_from=None, date_to=None, entry_type="all", sort=
                     "type": "food",
                     "type_label": "Питание",
                     "measured_at": r["consumed_at"],
+                "measured_at_ru": format_dt_ru(r["consumed_at"]),
                     "display": f"{r['food_name']} — {float(r['amount_value']):g} {UNIT_RU.get(r['amount_unit'], r['amount_unit'])}",
                     "comment": r["comment"] or "",
                     "sort_value": float(r["amount_value"]),
@@ -1010,6 +1026,17 @@ def format_day_ru(day_str):
     except ValueError:
         return day_str
 
+
+MONTHS_RU_SHORT = ["янв.", "февр.", "мар.", "апр.", "мая", "июня", "июля", "авг.", "сент.", "окт.", "нояб.", "дек."]
+
+def format_dt_ru(value):
+    try:
+        s = str(value)
+        d = date.fromisoformat(s[:10])
+        t = s[11:16]
+        return f"{d.day:02d} {MONTHS_RU_SHORT[d.month - 1]} {d.year % 100:02d} г. {t}"
+    except Exception:
+        return str(value)
 
 def build_pdf(entries, d_from, d_to, sort="date", filter_label="Все записи", owner_name=""):
     buffer = BytesIO()
@@ -1058,7 +1085,7 @@ def build_pdf(entries, d_from, d_to, sort="date", filter_label="Все запи�
 
             data = [
                 [
-                    Paragraph("Время", header_style),
+                    Paragraph("Дата и время", header_style),
                  Paragraph("Тип", header_style),
                  Paragraph("Значение", header_style),
                  Paragraph("Оценка и рекомендация", header_style),
@@ -1074,7 +1101,7 @@ def build_pdf(entries, d_from, d_to, sort="date", filter_label="Все запи�
                     assessment_html += "<br/>" + escape(recommendation_text)
                 data.append(
                     [
-                        Paragraph(escape(e["measured_at"][11:16]), cell_style),
+                        Paragraph(escape(e.get("measured_at_ru") or e["measured_at"]), cell_style),
                         Paragraph(escape(e["type_label"]), cell_style),
                         Paragraph(e.get("display_pdf") or escape(e["display"]), cell_style),
                         Paragraph(assessment_html or "-", cell_style),
@@ -1082,7 +1109,7 @@ def build_pdf(entries, d_from, d_to, sort="date", filter_label="Все запи�
                     ]
                 )
 
-            table = Table(data, repeatRows=1, colWidths=[16 * mm, 22 * mm, 56 * mm, 54 * mm, 38 * mm])
+            table = Table(data, repeatRows=1, colWidths=[30 * mm, 20 * mm, 50 * mm, 52 * mm, 34 * mm])
             table.setStyle(
                 TableStyle(
                     [
@@ -1438,6 +1465,30 @@ def admin_update_user(user_id):
 
     audit("admin_update_user", "users", user_id, {"old": old, "new": {"username": username, "display_name": display_name, "password_changed": bool(password)}})
     return jsonify(ok=True)
+
+
+@app.post("/api/settings")
+@login_required
+def api_set_settings():
+    data = request.get_json(silent=True) or {}
+    db = get_db()
+    row = db.execute("SELECT settings_json FROM users WHERE id = ?", (session["user_id"],)).fetchone()
+    current = dict(DEFAULT_SETTINGS)
+    if row and row["settings_json"]:
+        try:
+            current.update(json.loads(row["settings_json"]))
+        except Exception:
+            current = dict(DEFAULT_SETTINGS)
+    for key in DEFAULT_SETTINGS:
+        if key in data:
+            current[key] = bool(data[key])
+    db.execute(
+        "UPDATE users SET settings_json = ?, updated_at = datetime('now') WHERE id = ?",
+        (json.dumps(current), session["user_id"]),
+    )
+    db.commit()
+    audit("update_settings", "users", session["user_id"], {"settings": current})
+    return jsonify(ok=True, settings=current)
 
 
 def wa_rp():
@@ -2087,6 +2138,14 @@ APP_HTML = """<!doctype html>
 .about-note ul, .about-note ol { margin-left: 18px; padding-left: 6px; }
 .recommendation { margin-top: 4px; font-size: 12px; line-height: 1.35; color: #666; }
 .assess-cell { min-width: 150px; }
+.settings-section { margin-top: 14px; }
+.settings-title { font-size: 17px; font-weight: 600; margin: 8px 0; }
+.switch-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 48px; margin: 6px 0; font-size: 17px; }
+.switch-row input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+.switch { width: 51px; height: 31px; border-radius: 16px; background: #e9e9ea; position: relative; transition: background .2s; flex: 0 0 auto; }
+.switch::after { content: ''; position: absolute; top: 2px; left: 2px; width: 27px; height: 27px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.3); transition: left .2s; }
+.switch-row input:checked + .switch { background: #34c759; }
+.switch-row input:checked + .switch::after { left: 22px; }
 
 </style>
 </head>
@@ -2157,10 +2216,9 @@ APP_HTML = """<!doctype html>
       <div class="message" id="edit-msg"></div>
     </div>
 
-    <div class="card">
-      <details>
-        <summary>🩸 Глюкоза</summary>
-        <form id="glucose-form">
+    <div class="card" id="card-glucose">
+   <details>
+     <summary>🩸 Глюкоза</summary><form id="glucose-form">
           <label>Тип измерения</label>
           <div class="button-group" role="radiogroup" aria-label="Тип измерения глюкозы">
             <input type="radio" id="gt_fasting" name="glucose_type" value="fasting" checked>
@@ -2184,10 +2242,9 @@ APP_HTML = """<!doctype html>
       </details>
     </div>
 
-    <div class="card">
-      <details>
-        <summary>💓 Давление и пульс</summary>
-        <form id="vitals-form">
+    <div class="card" id="card-vitals">
+   <details>
+     <summary>💓 Давление и пульс</summary><form id="vitals-form">
           <div class="row">
             <div>
               <label>Систолическое</label>
@@ -2214,10 +2271,9 @@ APP_HTML = """<!doctype html>
       </details>
     </div>
 
-    <div class="card">
-      <details>
-        <summary>🥗 Питание</summary>
-        <form id="food-form">
+    <div class="card" id="card-food">
+   <details>
+     <summary>🥗 Питание</summary><form id="food-form">
           <label>Продукт</label>
           <input name="food_name" maxlength="150" required>
 
@@ -2304,8 +2360,6 @@ APP_HTML = """<!doctype html>
                 <th>Дата</th>
                 <th>Тип</th>
                 <th>Значение</th>
-                <th>Оценка</th>
-             <th>Комментарий</th>
                 <th></th>
               </tr>
             </thead>
@@ -2362,12 +2416,22 @@ APP_HTML = """<!doctype html>
 
  <div class="card">
       <details>
-        <summary id="wa-summary">🔐 Биометрия</summary>
-        <p class="muted" id="wa-hint">Быстрый вход по биометрии этого устройства, без пароля.</p>
-        <button type="button" id="wa-enable-btn" onclick="waRegister()">Включить</button>
-        <button type="button" class="secondary" onclick="waDelete()">Отключить</button>
-        <p class="muted" id="wa-availability"></p>
-        <div class="message" id="wa-msg"></div>
+        <summary>⚙️ Настройки</summary>
+        <div class="settings-section">
+          <div class="settings-title">Блоки на главной странице</div>
+          <label class="switch-row"><span>🩸 Глюкоза</span><input type="checkbox" id="set-glucose" checked><span class="switch"></span></label>
+          <label class="switch-row"><span>💓 Давление и пульс</span><input type="checkbox" id="set-vitals" checked><span class="switch"></span></label>
+          <label class="switch-row"><span>🥗 Питание</span><input type="checkbox" id="set-food" checked><span class="switch"></span></label>
+          <div class="message" id="settings-msg"></div>
+        </div>
+        <div class="settings-section">
+          <div class="settings-title" id="wa-summary">🔐 Биометрия</div>
+          <p class="muted" id="wa-hint">Быстрый вход по биометрии этого устройства, без пароля.</p>
+          <button type="button" id="wa-enable-btn" onclick="waRegister()">Включить</button>
+          <button type="button" class="secondary" onclick="waDelete()">Отключить</button>
+          <p class="muted" id="wa-availability"></p>
+          <div class="message" id="wa-msg"></div>
+        </div>
       </details>
     </div>
 
@@ -2442,6 +2506,37 @@ APP_HTML = """<!doctype html>
     var csrf = document.querySelector('meta[name="csrf-token"]').content;
     var IS_ADMIN = {{ is_admin }};
     var USER_ID = {{ user_id }};
+var USER_SETTINGS = {{ settings_json | safe }};
+
+function applySettings(s) {
+  var map = { glucose: 'card-glucose', vitals: 'card-vitals', food: 'card-food' };
+  for (var k in map) {
+    var el = document.getElementById(map[k]);
+    if (el) { el.style.display = s[k] ? '' : 'none'; }
+  }
+  var cg = document.getElementById('set-glucose'); if (cg) { cg.checked = !!s.glucose; }
+  var cv = document.getElementById('set-vitals'); if (cv) { cv.checked = !!s.vitals; }
+  var cf = document.getElementById('set-food'); if (cf) { cf.checked = !!s.food; }
+}
+
+function bindSettings() {
+  ['glucose', 'vitals', 'food'].forEach(function(k) {
+    var el = document.getElementById('set-' + k);
+    if (!el) { return; }
+    el.addEventListener('change', function() {
+      USER_SETTINGS[k] = el.checked;
+      applySettings(USER_SETTINGS);
+      sendJSON('POST', '/api/settings', USER_SETTINGS).then(function() {
+        setMsg('settings-msg', 'Сохранено', true);
+      }).catch(function(err) {
+        setMsg('settings-msg', err.message, false);
+      });
+    });
+  });
+}
+
+applySettings(USER_SETTINGS || {});
+bindSettings();
 
     function pad(n) { return String(n).padStart(2, '0'); }
 
@@ -2462,7 +2557,16 @@ APP_HTML = """<!doctype html>
       return p[2] + '.' + p[1] + '.' + p[0];
     }
 
-    function updateDateLabels() {
+    var MONTHS_RU_SHORT = ['янв.', 'февр.', 'мар.', 'апр.', 'мая', 'июня', 'июля', 'авг.', 'сент.', 'окт.', 'нояб.', 'дек.'];
+function fmtDateTimeRu(v) {
+  if (!v) return '';
+  var d = v.substring(0, 10).split('-');
+  var t = v.substring(11, 16);
+  var m = parseInt(d[1], 10) - 1;
+  return d[2] + ' ' + MONTHS_RU_SHORT[m] + ' ' + d[0].substring(2) + ' г. ' + t;
+}
+
+function updateDateLabels() {
       document.getElementById('date_from_label').textContent = fmtDateLabel(document.getElementById('date_from').value);
       document.getElementById('date_to_label').textContent = fmtDateLabel(document.getElementById('date_to').value);
     }
@@ -2580,7 +2684,7 @@ APP_HTML = """<!doctype html>
           var tr = document.createElement('tr');
 
           var td1 = document.createElement('td');
-          td1.textContent = entry.measured_at;
+          td1.textContent = entry.measured_at_ru || fmtDateTimeRu(entry.measured_at);
           tr.appendChild(td1);
 
           var td2 = document.createElement('td');
@@ -2590,24 +2694,6 @@ APP_HTML = """<!doctype html>
           var td3 = document.createElement('td');
           if (entry.display_html) { td3.innerHTML = entry.display_html; } else { td3.textContent = entry.display; }
           tr.appendChild(td3);
-
-          var tdAssess = document.createElement('td');
-          tdAssess.className = 'assess-cell';
-          if (entry.assessment) {
-            var assessBadge = document.createElement('span');
-            assessBadge.className = 'st-' + (entry.assessment_status || 'ok');
-            assessBadge.textContent = entry.assessment;
-            tdAssess.appendChild(assessBadge);
-            if (entry.recommendation) {
-              var recEl = document.createElement('div');
-              recEl.className = 'recommendation';
-              recEl.textContent = entry.recommendation;
-              tdAssess.appendChild(recEl);
-            }
-          }
-          var td4 = document.createElement('td');
-          td4.textContent = entry.comment || '';
-          tr.appendChild(td4);
 
           var td5 = document.createElement('td');
           var eb = document.createElement('button');
@@ -2877,7 +2963,7 @@ APP_HTML = """<!doctype html>
       document.getElementById('edit-glucose').hidden = entry.type !== 'glucose';
       document.getElementById('edit-vitals').hidden = entry.type !== 'vitals';
       document.getElementById('edit-food').hidden = entry.type !== 'food';
-      document.getElementById('edit-title').textContent = '✏️ ' + entry.type_label + ' · ' + entry.measured_at;
+      document.getElementById('edit-title').textContent = '✏️ ' + entry.type_label + ' · ' + (entry.measured_at_ru || entry.measured_at);
 
       document.getElementById('edit_measured_at').value = entry.measured_at.replace(' ', 'T').substring(0, 16);
       document.getElementById('edit_comment').value = entry.comment || '';
@@ -2952,7 +3038,7 @@ APP_HTML = """<!doctype html>
     }
 
     async function deleteEntry(entry) {
-      if (!confirm('Удалить запись «' + entry.type_label + '» от ' + entry.measured_at + '? Она скроется из истории и PDF.')) return;
+      if (!confirm('Удалить запись «' + entry.type_label + '» от ' + (entry.measured_at_ru || entry.measured_at) + '? Она скроется из истории и PDF.')) return;
 
       var url = '';
       if (entry.type === 'glucose') { url = '/api/glucose/' + entry.id; }
@@ -3146,8 +3232,22 @@ APP_HTML = """<!doctype html>
       window.location = '/login';
     }
 
-    loadHistory();
-  </script>
+    (function() {
+  // details manual toggle: гарантированное сворачивание/разворачивание
+  // блоков по тапу на заголовок, независимо от нативного поведения iOS.
+  document.querySelectorAll('summary').forEach(function(s) {
+    s.addEventListener('click', function(e) {
+      var d = s.closest('details');
+      if (!d) { return; }
+      e.preventDefault();
+      if (d.hasAttribute('open')) { d.removeAttribute('open'); } else { d.setAttribute('open', ''); }
+    });
+  });
+})();
+
+loadHistory();
+ </script>
+
 </body>
 </html>
 """
