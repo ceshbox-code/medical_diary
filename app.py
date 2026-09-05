@@ -2443,8 +2443,7 @@ APP_HTML = """<!doctype html>
         <div class="settings-section">
           <div class="settings-title" id="wa-summary">🔐 Биометрия</div>
           <p class="muted" id="wa-hint">Быстрый вход по биометрии этого устройства, без пароля.</p>
-          <button type="button" id="wa-enable-btn" onclick="waRegister()">Включить</button>
-          <button type="button" id="wa-disable-btn" class="secondary" onclick="waDelete()" hidden>Отключить</button>
+          <label class="switch-row"><span id="wa-toggle-label">Вход по биометрии</span><input type="checkbox" id="wa-toggle" onchange="onWaToggleChange(this)"><span class="switch"></span></label>
           <p class="muted" id="wa-availability"></p>
           <div class="message" id="wa-msg"></div>
         </div>
@@ -2894,35 +2893,67 @@ function updateDateLabels() {
       return 'биометрию (Windows Hello / Touch ID)';
     }
 
-    function updateWaButtons(registered) {
-      var enableBtn = document.getElementById('wa-enable-btn');
-      var disableBtn = document.getElementById('wa-disable-btn');
-      if (enableBtn) { enableBtn.hidden = !!registered; }
-      if (disableBtn) { disableBtn.hidden = !registered; }
+    var waBioSupported = false;
+
+    function updateWaToggle(registered) {
+      var toggle = document.getElementById('wa-toggle');
+      if (!toggle) { return; }
+      toggle.checked = !!registered;
+      // Включить можно только там, где есть биометрия. Отключить —
+      // это просто удаление ключей на сервере, для этого биометрия на
+      // текущем устройстве не нужна, поэтому если ключ уже есть
+      // (зарегистрирован хоть на каком-то устройстве), переключатель
+      // остаётся доступен в любом случае.
+      toggle.disabled = !registered && !waBioSupported;
+    }
+
+    function refreshWaStatus() {
+      return fetch('/api/webauthn/status').then(function(r) { return r.json(); }).then(function(out) {
+        updateWaToggle(!!out.registered);
+        return !!out.registered;
+      }).catch(function() { return null; });
     }
 
     (function() {
       var sum = document.getElementById('wa-summary');
-      var btn = document.getElementById('wa-enable-btn');
+      var label = document.getElementById('wa-toggle-label');
       var avail = document.getElementById('wa-availability');
       var n = biometricName();
       if (sum) { sum.textContent = '🔐 ' + n; }
-      if (btn) { btn.textContent = 'Включить ' + n; }
-      function noBio() {
-        if (avail) { avail.textContent = 'На этом устройстве нет биометрии — вход только по паролю.'; }
-        if (btn) { btn.disabled = true; }
-      }
-      if (!window.PublicKeyCredential || !PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable) { noBio(); }
-      else {
-        PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable().then(function(av) { if (!av) { noBio(); } });
-      }
-      // Реальное состояние ("включена ли биометрия") спрашиваем у
-      // сервера — ключ мог быть зарегистрирован на другом устройстве
-      // этого аккаунта, а "Отключить" удаляет все ключи целиком.
-      fetch('/api/webauthn/status').then(function(r) { return r.json(); }).then(function(out) {
-        updateWaButtons(!!out.registered);
-      }).catch(function() {});
+      if (label) { label.textContent = 'Вход по ' + n; }
+
+      var supportCheck = (window.PublicKeyCredential && PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable)
+        ? PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable().catch(function() { return false; })
+        : Promise.resolve(false);
+
+      supportCheck.then(function(av) {
+        waBioSupported = !!av;
+        if (!av && avail) {
+          avail.textContent = 'На этом устройстве нет биометрии — включить здесь нельзя, но отключить для аккаунта можно.';
+        }
+        // Реальное состояние ("включена ли биометрия") спрашиваем у
+        // сервера — ключ мог быть зарегистрирован на другом устройстве
+        // этого аккаунта, а отключение удаляет все ключи целиком.
+        refreshWaStatus();
+      });
     })();
+
+    async function onWaToggleChange(el) {
+      el.disabled = true;
+      try {
+        if (el.checked) {
+          await waRegister();
+        } else {
+          if (!confirm('Отключить вход по биометрии для этого аккаунта?')) {
+            el.checked = true;
+            return;
+          }
+          await waDelete();
+        }
+      } finally {
+        await refreshWaStatus();
+      }
+    }
 
     async function waRegister() {
       try {
@@ -2950,7 +2981,6 @@ function updateDateLabels() {
         var out = await res2.json();
         if (!res2.ok) throw new Error(out.error || 'HTTP ' + res2.status);
         try { localStorage.setItem('medical_diary_wa_credential_id', cred.id); } catch (e) {}
-        updateWaButtons(true);
         setMsg('wa-msg', biometricName() + ' включён для этого устройства', true);
       } catch (err) {
         setMsg('wa-msg', err.message, false);
@@ -2958,11 +2988,9 @@ function updateDateLabels() {
     }
 
     async function waDelete() {
-      if (!confirm('Отключить вход по Face ID на этом устройстве?')) return;
       try {
         await sendJSON('DELETE', '/api/webauthn/credentials', {});
         try { localStorage.removeItem('medical_diary_wa_credential_id'); } catch (e) {}
-        updateWaButtons(false);
         setMsg('wa-msg', 'Вход по биометрии отключён', true);
       } catch (err) {
         setMsg('wa-msg', err.message, false);
