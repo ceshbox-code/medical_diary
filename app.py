@@ -1569,6 +1569,22 @@ def wa_register():
     return jsonify(ok=True)
 
 
+@app.get("/api/webauthn/status")
+@login_required
+def wa_status():
+    # Источник истины для кнопок "Включить/Отключить" в настройках:
+    # спрашиваем сервер, а не полагаемся только на localStorage — ключ
+    # мог быть зарегистрирован на другом устройстве этого же аккаунта,
+    # и "Отключить" (удаляет все ключи аккаунта) должен быть доступен
+    # и там, даже если именно на этом устройстве Face ID не включали.
+    db = get_db()
+    row = db.execute(
+        "SELECT COUNT(*) AS c FROM webauthn_credentials WHERE user_id = ?",
+        (session["user_id"],),
+    ).fetchone()
+    return jsonify(registered=bool(row["c"]))
+
+
 @app.delete("/api/webauthn/credentials")
 @login_required
 def wa_delete_all():
@@ -2428,7 +2444,7 @@ APP_HTML = """<!doctype html>
           <div class="settings-title" id="wa-summary">🔐 Биометрия</div>
           <p class="muted" id="wa-hint">Быстрый вход по биометрии этого устройства, без пароля.</p>
           <button type="button" id="wa-enable-btn" onclick="waRegister()">Включить</button>
-          <button type="button" class="secondary" onclick="waDelete()">Отключить</button>
+          <button type="button" id="wa-disable-btn" class="secondary" onclick="waDelete()" hidden>Отключить</button>
           <p class="muted" id="wa-availability"></p>
           <div class="message" id="wa-msg"></div>
         </div>
@@ -2878,6 +2894,13 @@ function updateDateLabels() {
       return 'биометрию (Windows Hello / Touch ID)';
     }
 
+    function updateWaButtons(registered) {
+      var enableBtn = document.getElementById('wa-enable-btn');
+      var disableBtn = document.getElementById('wa-disable-btn');
+      if (enableBtn) { enableBtn.hidden = !!registered; }
+      if (disableBtn) { disableBtn.hidden = !registered; }
+    }
+
     (function() {
       var sum = document.getElementById('wa-summary');
       var btn = document.getElementById('wa-enable-btn');
@@ -2889,8 +2912,16 @@ function updateDateLabels() {
         if (avail) { avail.textContent = 'На этом устройстве нет биометрии — вход только по паролю.'; }
         if (btn) { btn.disabled = true; }
       }
-      if (!window.PublicKeyCredential || !PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable) { noBio(); return; }
-      PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable().then(function(av) { if (!av) { noBio(); } });
+      if (!window.PublicKeyCredential || !PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable) { noBio(); }
+      else {
+        PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable().then(function(av) { if (!av) { noBio(); } });
+      }
+      // Реальное состояние ("включена ли биометрия") спрашиваем у
+      // сервера — ключ мог быть зарегистрирован на другом устройстве
+      // этого аккаунта, а "Отключить" удаляет все ключи целиком.
+      fetch('/api/webauthn/status').then(function(r) { return r.json(); }).then(function(out) {
+        updateWaButtons(!!out.registered);
+      }).catch(function() {});
     })();
 
     async function waRegister() {
@@ -2919,6 +2950,7 @@ function updateDateLabels() {
         var out = await res2.json();
         if (!res2.ok) throw new Error(out.error || 'HTTP ' + res2.status);
         try { localStorage.setItem('medical_diary_wa_credential_id', cred.id); } catch (e) {}
+        updateWaButtons(true);
         setMsg('wa-msg', biometricName() + ' включён для этого устройства', true);
       } catch (err) {
         setMsg('wa-msg', err.message, false);
@@ -2930,6 +2962,7 @@ function updateDateLabels() {
       try {
         await sendJSON('DELETE', '/api/webauthn/credentials', {});
         try { localStorage.removeItem('medical_diary_wa_credential_id'); } catch (e) {}
+        updateWaButtons(false);
         setMsg('wa-msg', 'Вход по биометрии отключён', true);
       } catch (err) {
         setMsg('wa-msg', err.message, false);
