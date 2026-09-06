@@ -2,6 +2,10 @@ import os
 import sqlite3
 import secrets
 import json
+import threading
+import time
+import fcntl
+import glob
 from datetime import datetime, date, timedelta
 from functools import wraps
 from io import BytesIO
@@ -119,16 +123,18 @@ app.permanent_session_lifetime = timedelta(days=int(os.getenv("SESSION_LIFETIME_
 
 UNIT_RU = {"g": "г", "ml": "мл", "pcs": "шт", "portion": "порция"}
 
-REF_RANGES = {
+DEFAULT_RANGES = {
     "glucose_fasting": (3.3, 5.5),
     "glucose_post": (3.3, 7.8),
     "systolic": (90, 120),
     "diastolic": (60, 80),
     "pulse": (60, 100),
 }
+REF_RANGES = DEFAULT_RANGES  # используется как запасной вариант, если у пользователя нет своих границ
 
 STATUS_COLORS = {"low": "#fff3c4", "ok": "#d9f2d9", "high": "#fbd9d9"}
-DEFAULT_SETTINGS = {"glucose": True, "vitals": True, "food": True}
+STATUS_ICON = {"low": "\u25bc", "ok": "", "high": "\u25b2"}  # ▼ ниже / (без иконки) норма / ▲ выше
+DEFAULT_SETTINGS = {"glucose": True, "vitals": True, "food": True, "ranges_default": True}
 
 
 def status_of(value, low, high):
@@ -139,16 +145,52 @@ def status_of(value, low, high):
     return "ok"
 
 
+def get_user_settings(user_id):
+    """Настройки пользователя (видимость блоков + персональные диапазоны),
+    смёрженные с значениями по умолчанию. Некорректные/битые сохранённые
+    данные тихо игнорируются — пользователь просто получает диапазоны по
+    умолчанию, а не ошибку 500."""
+    settings = dict(DEFAULT_SETTINGS)
+    ranges = {k: tuple(v) for k, v in DEFAULT_RANGES.items()}
+    db = get_db()
+    row = db.execute("SELECT settings_json FROM users WHERE id = ?", (user_id,)).fetchone()
+    if row and row["settings_json"]:
+        try:
+            stored = json.loads(row["settings_json"])
+            for key in DEFAULT_SETTINGS:
+                if key in stored:
+                    settings[key] = bool(stored[key])
+            # Пока включён режим "по умолчанию", сохранённые персональные
+            # диапазоны игнорируются (но НЕ стираются) — так пользователь
+            # может временно вернуться к дефолтным значениям и затем снова
+            # включить свои старые числа, не вводя их заново.
+            if not settings.get("ranges_default", True):
+                custom_ranges = stored.get("ranges") or {}
+                for key, bounds in custom_ranges.items():
+                    if key not in ranges or not isinstance(bounds, (list, tuple)) or len(bounds) != 2:
+                        continue
+                    try:
+                        low, high = float(bounds[0]), float(bounds[1])
+                    except (TypeError, ValueError):
+                        continue
+                    if 0 <= low < high <= 1000:
+                        ranges[key] = (low, high)
+        except Exception:
+            pass
+    return settings, ranges
 
 
-def glucose_assessment(value_mmol_l, glucose_type):
+
+
+def glucose_assessment(value_mmol_l, glucose_type, ranges=None):
+    ranges = ranges or DEFAULT_RANGES
     try:
         value = float(value_mmol_l)
     except Exception:
         return "", "", "ok"
 
     key = "glucose_fasting" if glucose_type == "fasting" else "glucose_post"
-    low, high = REF_RANGES.get(key, REF_RANGES["glucose_fasting"])
+    low, high = ranges.get(key, ranges["glucose_fasting"])
     st = status_of(value, low, high)
 
     if st == "low":
@@ -172,7 +214,8 @@ def glucose_assessment(value_mmol_l, glucose_type):
     )
 
 
-def vitals_assessment(systolic, diastolic, pulse):
+def vitals_assessment(systolic, diastolic, pulse, ranges=None):
+    ranges = ranges or DEFAULT_RANGES
     try:
         s = int(systolic)
         d = int(diastolic)
@@ -186,9 +229,9 @@ def vitals_assessment(systolic, diastolic, pulse):
         except Exception:
             p = None
 
-    s_st = status_of(s, *REF_RANGES["systolic"])
-    d_st = status_of(d, *REF_RANGES["diastolic"])
-    p_st = status_of(p, *REF_RANGES["pulse"]) if p is not None else None
+    s_st = status_of(s, *ranges["systolic"])
+    d_st = status_of(d, *ranges["diastolic"])
+    p_st = status_of(p, *ranges["pulse"]) if p is not None else None
 
     if s >= 180 or d >= 120:
         assessment = "Очень высокое давление"
@@ -239,19 +282,22 @@ def food_assessment():
     )
 
 
-def add_assessments(entries):
+def add_assessments(entries, ranges=None):
+    ranges = ranges or DEFAULT_RANGES
     for e in entries:
         try:
             if e.get("type") == "glucose":
                 assessment, recommendation, status = glucose_assessment(
                     e.get("value_mmol_l"),
                     e.get("glucose_type", "fasting"),
+                    ranges,
                 )
             elif e.get("type") == "vitals":
                 assessment, recommendation, status = vitals_assessment(
                     e.get("systolic_mmhg"),
                     e.get("diastolic_mmhg"),
                     e.get("pulse_bpm"),
+                    ranges,
                 )
             else:
                 assessment, recommendation, status = food_assessment()
@@ -426,6 +472,120 @@ def init_db():
 
 
 init_db()
+
+
+BACKUP_ENABLED = os.getenv("BACKUP_ENABLED", "true").lower() not in ("0", "false", "no")
+BACKUP_DIR = os.getenv("BACKUP_DIR", os.path.join(os.path.dirname(DATABASE) or ".", "backups"))
+BACKUP_HOUR = int(os.getenv("BACKUP_HOUR", "3"))
+BACKUP_MINUTE = int(os.getenv("BACKUP_MINUTE", "0"))
+BACKUP_RETENTION_DAYS = int(os.getenv("BACKUP_RETENTION_DAYS", "14"))
+
+
+def cleanup_old_backups():
+    cutoff = datetime.now() - timedelta(days=BACKUP_RETENTION_DAYS)
+    for path in glob.glob(os.path.join(BACKUP_DIR, "medical_diary-*.db")):
+        try:
+            mtime = datetime.fromtimestamp(os.path.getmtime(path))
+            if mtime < cutoff:
+                os.remove(path)
+                print(f"[backup] Удалена устаревшая копия: {path}", flush=True)
+        except OSError:
+            pass
+
+
+def backup_database(force=False):
+    """Снимает полную копию базы через встроенный SQLite Backup API, а не
+    простым копированием файла: при включённом WAL-режиме (он у нас
+    включён) копирование файла напрямую может не захватить данные, ещё не
+    перенесённые из WAL-журнала в основной файл, и дать повреждённую или
+    неполную копию. backup() решает это на уровне самого движка SQLite.
+
+    Возвращает путь к файлу копии, или None, если бэкап не потребовался
+    (уже есть за сегодня) либо не удался.
+    """
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+    if force:
+        # Ручной запуск получает точную метку времени, а не только дату —
+        # чтобы не перезаписать тихо уже снятую сегодня автоматическую
+        # копию и чтобы несколько ручных запусков не затирали друг друга.
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    else:
+        stamp = datetime.now().strftime("%Y%m%d")
+    dest_path = os.path.join(BACKUP_DIR, f"medical_diary-{stamp}.db")
+
+    if not force and os.path.exists(dest_path):
+        # За сегодня копия уже есть (например, воркер перезапускался) —
+        # не делаем повторно.
+        return dest_path
+
+    lock_path = os.path.join(BACKUP_DIR, ".backup.lock")
+    lock_fd = open(lock_path, "w")
+    try:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            # Бэкап прямо сейчас снимает другой воркер (при нескольких
+            # gunicorn-воркерах у каждого свой поток-планировщик) — не
+            # дублируем работу, просто выходим.
+            return None
+
+        if not force and os.path.exists(dest_path):
+            return dest_path
+
+        tmp_path = dest_path + ".tmp"
+        src = sqlite3.connect(DATABASE)
+        try:
+            dst = sqlite3.connect(tmp_path)
+            try:
+                src.backup(dst)
+            finally:
+                dst.close()
+        finally:
+            src.close()
+
+        os.replace(tmp_path, dest_path)
+        cleanup_old_backups()
+        print(f"[backup] Резервная копия БД создана: {dest_path}", flush=True)
+        return dest_path
+    except Exception as e:
+        print(f"[backup] ОШИБКА резервного копирования: {e}", flush=True)
+        return None
+    finally:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        except Exception:
+            pass
+        lock_fd.close()
+
+
+def _seconds_until(hour, minute):
+    now = datetime.now()
+    target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if target <= now:
+        target += timedelta(days=1)
+    return (target - now).total_seconds()
+
+
+def backup_scheduler_loop():
+    while True:
+        try:
+            time.sleep(_seconds_until(BACKUP_HOUR, BACKUP_MINUTE))
+            backup_database()
+        except Exception as e:
+            print(f"[backup] Ошибка в планировщике бэкапов: {e}", flush=True)
+            time.sleep(60)
+
+
+if BACKUP_ENABLED:
+    print(
+        f"[backup] Автобэкап включён: каталог {BACKUP_DIR}, "
+        f"время {BACKUP_HOUR:02d}:{BACKUP_MINUTE:02d} (по времени сервера), "
+        f"хранение {BACKUP_RETENTION_DAYS} дн.",
+        flush=True,
+    )
+    threading.Thread(target=backup_scheduler_loop, daemon=True).start()
+else:
+    print("[backup] Автобэкап отключён (BACKUP_ENABLED=false)", flush=True)
 
 
 def now_local():
@@ -705,14 +865,7 @@ def dashboard():
     if "csrf_token" not in session:
         session["csrf_token"] = secrets.token_hex(32)
 
-    db = get_db()
-    srow = db.execute("SELECT settings_json FROM users WHERE id = ?", (session["user_id"],)).fetchone()
-    settings = dict(DEFAULT_SETTINGS)
-    if srow and srow["settings_json"]:
-        try:
-            settings.update(json.loads(srow["settings_json"]))
-        except Exception:
-            settings = dict(DEFAULT_SETTINGS)
+    settings, ranges = get_user_settings(session["user_id"])
     return render_template_string(
         APP_HTML,
         csrf_token=session["csrf_token"],
@@ -720,6 +873,8 @@ def dashboard():
         is_admin=1 if session.get("is_admin") else 0,
         user_id=session.get("user_id", 0),
         settings_json=json.dumps(settings),
+        ranges_json=json.dumps({k: list(v) for k, v in ranges.items()}),
+        default_ranges_json=json.dumps({k: list(v) for k, v in DEFAULT_RANGES.items()}),
     )
 
 
@@ -852,11 +1007,13 @@ def api_food():
 MAX_HISTORY_RANGE_DAYS = 366
 
 
-def query_entries(user_id, date_from=None, date_to=None, entry_type="all", sort="date"):
+def query_entries(user_id, date_from=None, date_to=None, entry_type="all", sort="date", ranges=None):
     if entry_type not in ("all", "glucose", "vitals", "food"):
         raise ValueError("Некорректный тип фильтра")
     if sort not in ("date", "value"):
         raise ValueError("Некорректный порядок сортировки")
+
+    ranges = ranges or DEFAULT_RANGES
 
     today = date.today()
     default_from = today - timedelta(days=30)
@@ -892,8 +1049,9 @@ def query_entries(user_id, date_from=None, date_to=None, entry_type="all", sort=
         for r in rows:
             glucose_type_label = "натощак" if r["glucose_type"] == "fasting" else "после еды"
             val = float(r["value_mmol_l"])
-            low, high = REF_RANGES["glucose_fasting" if r["glucose_type"] == "fasting" else "glucose_post"]
+            low, high = ranges["glucose_fasting" if r["glucose_type"] == "fasting" else "glucose_post"]
             st = status_of(val, low, high)
+            icon = STATUS_ICON[st]
             entries.append(
                 {
                     "id": r["id"],
@@ -902,12 +1060,13 @@ def query_entries(user_id, date_from=None, date_to=None, entry_type="all", sort=
                     "measured_at": r["measured_at"],
                 "measured_at_ru": format_dt_ru(r["measured_at"]),
                     "display": f"{val:.1f} ммоль/л ({glucose_type_label})",
-                    "display_html": f'<span class="st-{st}">{val:.1f}</span> ммоль/л ({glucose_type_label})',
-                    "display_pdf": f'<font backcolor="{STATUS_COLORS[st]}">{val:.1f}</font> ммоль/л ({glucose_type_label})',
+                    "display_html": f'<span class="st-{st}">{val:.1f}{icon}</span> ммоль/л ({glucose_type_label})',
+                    "display_pdf": f'<font backcolor="{STATUS_COLORS[st]}">{val:.1f}{icon}</font> ммоль/л ({glucose_type_label})',
                     "comment": r["comment"] or "",
                     "sort_value": val,
                     "glucose_type": r["glucose_type"],
                     "value_mmol_l": val,
+                    "status": st,
                 }
             )
 
@@ -929,17 +1088,21 @@ def query_entries(user_id, date_from=None, date_to=None, entry_type="all", sort=
             s = int(r["systolic_mmhg"])
             d = int(r["diastolic_mmhg"])
             p = r["pulse_bpm"]
-            st_s = status_of(s, *REF_RANGES["systolic"])
-            st_d = status_of(d, *REF_RANGES["diastolic"])
+            st_s = status_of(s, *ranges["systolic"])
+            st_d = status_of(d, *ranges["diastolic"])
+            icon_s = STATUS_ICON[st_s]
+            icon_d = STATUS_ICON[st_d]
             display = f"{s}/{d} мм рт. ст."
-            display_html = f'<span class="st-{st_s}">{s}</span>/<span class="st-{st_d}">{d}</span> мм рт. ст.'
-            display_pdf = f'<font backcolor="{STATUS_COLORS[st_s]}">{s}</font>/<font backcolor="{STATUS_COLORS[st_d]}">{d}</font> мм рт. ст.'
+            display_html = f'<span class="st-{st_s}">{s}{icon_s}</span>/<span class="st-{st_d}">{d}{icon_d}</span> мм рт. ст.'
+            display_pdf = f'<font backcolor="{STATUS_COLORS[st_s]}">{s}{icon_s}</font>/<font backcolor="{STATUS_COLORS[st_d]}">{d}{icon_d}</font> мм рт. ст.'
+            overall_st = "high" if ("high" in (st_s, st_d)) else ("low" if "low" in (st_s, st_d) else "ok")
             if p is not None:
                 p = int(p)
-                st_p = status_of(p, *REF_RANGES["pulse"])
+                st_p = status_of(p, *ranges["pulse"])
+                icon_p = STATUS_ICON[st_p]
                 display += f", пульс {p}"
-                display_html += f', пульс <span class="st-{st_p}">{p}</span>'
-                display_pdf += f', пульс <font backcolor="{STATUS_COLORS[st_p]}">{p}</font>'
+                display_html += f', пульс <span class="st-{st_p}">{p}{icon_p}</span>'
+                display_pdf += f', пульс <font backcolor="{STATUS_COLORS[st_p]}">{p}{icon_p}</font>'
             entries.append(
                 {
                     "id": r["id"],
@@ -955,6 +1118,9 @@ def query_entries(user_id, date_from=None, date_to=None, entry_type="all", sort=
                     "systolic_mmhg": s,
                     "diastolic_mmhg": d,
                     "pulse_bpm": p,
+                    "status": overall_st,
+                    "systolic_status": st_s,
+                    "diastolic_status": st_d,
                 }
             )
 
@@ -986,6 +1152,7 @@ def query_entries(user_id, date_from=None, date_to=None, entry_type="all", sort=
                     "food_name": r["food_name"],
                     "amount_value": float(r["amount_value"]),
                     "amount_unit": r["amount_unit"],
+                    "status": "ok",
                 }
             )
 
@@ -996,18 +1163,70 @@ def query_entries(user_id, date_from=None, date_to=None, entry_type="all", sort=
     return entries, d_from, d_to
 
 
+@app.get("/api/last")
+@login_required
+def api_last_entry():
+    entry_type = request.args.get("type", "")
+    if entry_type not in ("glucose", "vitals", "food"):
+        return jsonify(error="Некорректный тип"), 400
+
+    db = get_db()
+    if entry_type == "glucose":
+        r = db.execute(
+            "SELECT * FROM glucose_entries WHERE user_id = ? AND deleted_at IS NULL ORDER BY measured_at DESC LIMIT 1",
+            (session["user_id"],),
+        ).fetchone()
+        if not r:
+            return jsonify(found=False)
+        return jsonify(
+            found=True,
+            glucose_type=r["glucose_type"],
+            value=float(r["value_mmol_l"]),
+            comment=r["comment"] or "",
+        )
+    if entry_type == "vitals":
+        r = db.execute(
+            "SELECT * FROM blood_pressure_entries WHERE user_id = ? AND deleted_at IS NULL ORDER BY measured_at DESC LIMIT 1",
+            (session["user_id"],),
+        ).fetchone()
+        if not r:
+            return jsonify(found=False)
+        return jsonify(
+            found=True,
+            systolic=r["systolic_mmhg"],
+            diastolic=r["diastolic_mmhg"],
+            pulse=r["pulse_bpm"],
+            comment=r["comment"] or "",
+        )
+    r = db.execute(
+        "SELECT * FROM food_entries WHERE user_id = ? AND deleted_at IS NULL ORDER BY consumed_at DESC LIMIT 1",
+        (session["user_id"],),
+    ).fetchone()
+    if not r:
+        return jsonify(found=False)
+    return jsonify(
+        found=True,
+        food_name=r["food_name"],
+        amount_value=float(r["amount_value"]),
+        amount_unit=r["amount_unit"],
+        comment=r["comment"] or "",
+    )
+
+
 @app.get("/api/history")
 @login_required
 def api_history():
     try:
+        _settings, ranges = get_user_settings(session["user_id"])
         entries, d_from, d_to = query_entries(
             session["user_id"],
             request.args.get("date_from"),
             request.args.get("date_to"),
             request.args.get("type", "all"),
             request.args.get("sort", "date"),
+            ranges,
         )
-        entries = add_assessments(entries)
+        entries = add_assessments(entries, ranges)
         return jsonify(entries=entries, date_from=d_from, date_to=d_to)
     except ValueError as e:
         return jsonify(error=str(e)), 400
@@ -1132,6 +1351,7 @@ def build_pdf(entries, d_from, d_to, sort="date", filter_label="Все запи�
 @app.get("/export.pdf")
 @login_required
 def export_pdf():
+    _settings, ranges = get_user_settings(session["user_id"])
     try:
         entries, d_from, d_to = query_entries(
             session["user_id"],
@@ -1139,11 +1359,12 @@ def export_pdf():
             request.args.get("date_to"),
             request.args.get("type", "all"),
             request.args.get("sort", "date"),
+            ranges,
         )
     except ValueError as e:
         return jsonify(error=str(e)), 400
 
-    entries = add_assessments(entries)
+    entries = add_assessments(entries, ranges)
     type_label = {
         "all": "Все записи",
         "glucose": "Только глюкоза",
@@ -1187,6 +1408,42 @@ def admin_required(f):
         return f(*args, **kwargs)
 
     return wrapper
+
+
+@app.get("/api/admin/backups")
+@admin_required
+def admin_list_backups():
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+    items = []
+    for path in sorted(glob.glob(os.path.join(BACKUP_DIR, "medical_diary-*.db")), reverse=True):
+        try:
+            stat = os.stat(path)
+            items.append(
+                {
+                    "name": os.path.basename(path),
+                    "size_bytes": stat.st_size,
+                    "created_at": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+                }
+            )
+        except OSError:
+            continue
+    return jsonify(
+        enabled=BACKUP_ENABLED,
+        backup_dir=BACKUP_DIR,
+        scheduled_time=f"{BACKUP_HOUR:02d}:{BACKUP_MINUTE:02d}",
+        retention_days=BACKUP_RETENTION_DAYS,
+        backups=items,
+    )
+
+
+@app.post("/api/admin/backups/run")
+@admin_required
+def admin_run_backup():
+    path = backup_database(force=True)
+    if not path:
+        return jsonify(error="Не удалось создать резервную копию — подробности в логах сервера"), 500
+    audit("manual_backup", "backups", None, {"file": os.path.basename(path)})
+    return jsonify(ok=True, file=os.path.basename(path))
 
 
 @app.get("/api/admin/users")
@@ -1473,22 +1730,67 @@ def api_set_settings():
     data = request.get_json(silent=True) or {}
     db = get_db()
     row = db.execute("SELECT settings_json FROM users WHERE id = ?", (session["user_id"],)).fetchone()
+    try:
+        stored = json.loads(row["settings_json"]) if row and row["settings_json"] else {}
+    except Exception:
+        stored = {}
+
     current = dict(DEFAULT_SETTINGS)
-    if row and row["settings_json"]:
-        try:
-            current.update(json.loads(row["settings_json"]))
-        except Exception:
-            current = dict(DEFAULT_SETTINGS)
+    current.update({k: v for k, v in stored.items() if k in DEFAULT_SETTINGS})
     for key in DEFAULT_SETTINGS:
         if key in data:
             current[key] = bool(data[key])
+
+    current_ranges = {k: list(v) for k, v in DEFAULT_RANGES.items()}
+    stored_ranges = stored.get("ranges") or {}
+    for key in DEFAULT_RANGES:
+        bounds = stored_ranges.get(key)
+        if isinstance(bounds, (list, tuple)) and len(bounds) == 2:
+            current_ranges[key] = list(bounds)
+
+    if "ranges" in data:
+        incoming_ranges = data["ranges"]
+        if not isinstance(incoming_ranges, dict):
+            return jsonify(error="Некорректный формат диапазонов"), 400
+        for key, bounds in incoming_ranges.items():
+            if key not in DEFAULT_RANGES:
+                continue
+            if not isinstance(bounds, (list, tuple)) or len(bounds) != 2:
+                return jsonify(error=f"Диапазон «{key}» должен быть парой чисел [мин, макс]"), 400
+            try:
+                low, high = float(bounds[0]), float(bounds[1])
+            except (TypeError, ValueError):
+                return jsonify(error=f"Диапазон «{key}»: значения должны быть числами"), 400
+            if not (0 <= low < high <= 1000):
+                return jsonify(error=f"Диапазон «{key}»: минимум должен быть меньше максимума (0–1000)"), 400
+            current_ranges[key] = [low, high]
+
+    current["ranges"] = current_ranges
     db.execute(
         "UPDATE users SET settings_json = ?, updated_at = datetime('now') WHERE id = ?",
         (json.dumps(current), session["user_id"]),
     )
     db.commit()
-    audit("update_settings", "users", session["user_id"], {"settings": current})
-    return jsonify(ok=True, settings=current)
+    audit(
+        "update_settings",
+        "users",
+        session["user_id"],
+        {"settings": {k: v for k, v in current.items() if k in DEFAULT_SETTINGS}, "ranges_changed": "ranges" in data},
+    )
+    # Если в итоге включён режим "по умолчанию" — отдаём клиенту именно
+    # дефолтные диапазоны, а не то, что лежит в базе, чтобы фронтенд не
+    # применял чужие (старые персональные) числа, пока переключатель "по
+    # умолчанию" включён.
+    effective_ranges = (
+        {k: list(v) for k, v in DEFAULT_RANGES.items()}
+        if current.get("ranges_default", True)
+        else current_ranges
+    )
+    return jsonify(
+        ok=True,
+        settings={k: v for k, v in current.items() if k in DEFAULT_SETTINGS},
+        ranges=effective_ranges,
+    )
 
 
 def wa_rp():
@@ -2012,6 +2314,17 @@ APP_HTML = """<!doctype html>
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="csrf-token" content="{{ csrf_token }}">
+  <script>
+    (function() {
+      // Определяем тему как можно раньше, до отрисовки страницы, чтобы
+      // не было мигания светлой темой перед переключением на тёмную.
+      try {
+        var t = localStorage.getItem('medical_diary_theme');
+        var dark = t ? (t === 'dark') : (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+        if (dark) { document.documentElement.classList.add('theme-dark'); }
+      } catch (e) {}
+    })();
+  </script>
   <title>Медицинский дневник</title>
   <link rel="apple-touch-icon" sizes="57x57" href="/apple-icon-57x57.png">
   <link rel="apple-touch-icon" sizes="60x60" href="/apple-icon-60x60.png">
@@ -2081,14 +2394,14 @@ APP_HTML = """<!doctype html>
     }
     button, .button {
       display: block; width: 100%; max-width: 100%; min-height: 52px;
-      border: 0; border-radius: 14px; background: #007aff; color: #fff;
-      font-size: 20px; text-align: center; text-decoration: none;
+      border: 1px solid transparent; border-radius: 12px; background: #3a6ea5; color: #fff;
+      font-size: 18px; font-weight: 600; text-align: center; text-decoration: none;
       line-height: 52px; margin-top: 14px; cursor: pointer;
     }
-    button.danger { background: #d70015; min-height: 44px; line-height: 44px; font-size: 16px; margin-top: 0; }
+    button.danger { background: #c0392b; min-height: 44px; line-height: 44px; font-size: 16px; margin-top: 0; }
     button.secondary { background: #8e8e93; }
     button.edit-btn { width: auto; min-height: 40px; line-height: 40px; font-size: 16px; margin-top: 0; padding: 0 12px; }
-    button.del-btn { width: auto; min-height: 40px; line-height: 40px; font-size: 16px; margin-top: 0; padding: 0 10px; background: #d70015; margin-left: 6px; }
+    button.del-btn { width: auto; min-height: 40px; line-height: 40px; font-size: 16px; margin-top: 0; padding: 0 10px; margin-left: 6px; }
     .cell-actions { display: flex; gap: 6px; }
     .cell-actions button { margin-left: 0; }
     [hidden] { display: none !important; }
@@ -2163,9 +2476,94 @@ APP_HTML = """<!doctype html>
 .switch-row input:checked + .switch { background: #34c759; }
 .switch-row input:checked + .switch::after { left: 22px; }
 
+.field-hint { margin: 2px 0 0; font-size: 13px; color: #8e8e93; }
+.quick-repeat { background: #eaf1f7; color: #3a6ea5; }
+.quick-repeat:active { opacity: .7; }
+
+#toast {
+  position: fixed; left: 12px; right: 12px; z-index: 200;
+  top: calc(env(safe-area-inset-top) + 10px);
+  display: flex; justify-content: center; pointer-events: none;
+}
+#toast .toast-bubble {
+  max-width: 92%; padding: 10px 18px; border-radius: 14px;
+  font-size: 15px; font-weight: 600; color: #fff; text-align: center;
+  box-shadow: 0 4px 14px rgba(0,0,0,.25);
+  opacity: 0; transform: translateY(-12px); transition: opacity .2s, transform .2s;
+}
+#toast .toast-bubble.show { opacity: 1; transform: translateY(0); }
+#toast .toast-bubble.ok { background: #1a7f37; }
+#toast .toast-bubble.error { background: #d70015; }
+
+.day-row td { background: #f2f2f7; font-weight: 700; color: #444; font-size: 13px; padding: 8px 6px; }
+.history-empty td { text-align: center; color: #8e8e93; padding: 24px 6px; }
+
+.trend-chart-wrap { margin: 10px 0 4px; }
+.trend-chart-wrap canvas { width: 100%; height: 150px; display: block; }
+.trend-chart-title { font-size: 14px; font-weight: 700; color: #444; margin: 12px 0 2px; }
+.chart-legend { font-size: 11px; color: #8e8e93; margin: 2px 0 0; line-height: 1.4; }
+
+.range-row { display: grid; grid-template-columns: 1fr 70px 70px; gap: 8px; align-items: center; margin: 8px 0; }
+.range-row span { font-size: 15px; color: #333; }
+.range-row input { min-height: 40px; font-size: 15px; padding: 4px 6px; }
+.settings-reset { background: #8e8e93; margin-top: 10px; }
+
+.tab-bar {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 50;
+  display: flex; background: #fff; border-top: 1px solid #ddd;
+  padding: 4px env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+}
+.tab-btn {
+  flex: 1 1 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 2px; padding: 6px 2px; background: none; border: 0; color: #8e8e93;
+  font-size: 11px; min-height: 52px; margin: 0; line-height: 1.2; cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.tab-btn .tab-icon { font-size: 22px; line-height: 1; }
+.tab-btn.active { color: #3a6ea5; }
+
+html.theme-dark body { background: #000; }
+html.theme-dark header { background: #1c1c1e; border-bottom-color: #2c2c2e; }
+html.theme-dark header .user { color: #a9a9ae; }
+html.theme-dark .card { background: #1c1c1e; }
+html.theme-dark summary, html.theme-dark .settings-title, html.theme-dark .edit-title { color: #f2f2f7; }
+html.theme-dark label { color: #d1d1d6; }
+html.theme-dark input, html.theme-dark select, html.theme-dark textarea { background: #2c2c2e; border-color: #3a3a3c; color: #f2f2f7; }
+html.theme-dark button, html.theme-dark .button {
+  background: #000; color: #f2f2f7; border: 1px solid rgba(255,255,255,.4);
+}
+html.theme-dark button.secondary, html.theme-dark .settings-reset {
+  background: #000; color: #f2f2f7; border: 1px solid rgba(255,255,255,.4);
+}
+html.theme-dark button.danger {
+  background: #000; color: #ff6961; border: 1px solid rgba(255,105,97,.55);
+}
+html.theme-dark .button-group label, html.theme-dark .date-btn { background: #2c2c2e; border-color: #3a3a3c; color: #f2f2f7; }
+html.theme-dark .button-group input:checked + label { background: #000; border-color: rgba(255,255,255,.5); color: #f2f2f7; }
+html.theme-dark .muted, html.theme-dark .field-hint, html.theme-dark .recommendation { color: #98989d; }
+html.theme-dark th, html.theme-dark td { border-color: #3a3a3c; color: #f2f2f7; }
+html.theme-dark .day-row td { background: #2c2c2e; color: #c7c7cc; }
+html.theme-dark .about-note { color: #e5e5ea; }
+html.theme-dark .quick-repeat { background: #000; color: #f2f2f7; border: 1px solid rgba(100,181,255,.55); }
+html.theme-dark .tab-bar { background: #1c1c1e; border-top-color: #2c2c2e; }
+html.theme-dark .tab-btn.active { color: #fff; }
+html.theme-dark .trend-chart-title { color: #c7c7cc; }
+html.theme-dark .chart-legend { color: #7a7a7e; }
+html.theme-dark button.edit-btn { background: #000; color: #f2f2f7; border: 1px solid rgba(255,255,255,.4); }
+html.theme-dark button.del-btn { background: #000; color: #ff6961; border: 1px solid rgba(255,105,97,.55); }
+
+button.edit-btn, button.del-btn {
+  width: 36px; height: 36px; min-height: 36px; line-height: 36px;
+  padding: 0; border-radius: 50%; font-size: 15px; margin-top: 0;
+  background: rgba(60,60,67,.08); color: #48484a;
+}
+button.del-btn { margin-left: 6px; background: rgba(192,57,43,.1); color: #c0392b; }
+button.edit-btn:active, button.del-btn:active { opacity: .55; }
+
 </style>
 </head>
 <body>
+  <div id="toast"><div class="toast-bubble" id="toast-bubble"></div></div>
   <header>
     <span class="title">Дневник</span>
     <span class="user">{{ display_name }}</span>
@@ -2173,6 +2571,109 @@ APP_HTML = """<!doctype html>
   </header>
 
   <main>
+    <div id="page-input" class="tab-page">
+    <div class="card" id="card-glucose">
+   <details>
+     <summary>🩸 Глюкоза</summary><form id="glucose-form">
+          <button type="button" class="quick-repeat" onclick="repeatLast('glucose', event)">↻ Повторить последнее</button>
+
+          <label>Тип измерения</label>
+          <div class="button-group" role="radiogroup" aria-label="Тип измерения глюкозы">
+            <input type="radio" id="gt_fasting" name="glucose_type" value="fasting" checked>
+            <label for="gt_fasting"><span class="emoji">🌅</span><span>Натощак</span></label>
+            <input type="radio" id="gt_postmeal" name="glucose_type" value="post_meal">
+            <label for="gt_postmeal"><span class="emoji">🍽️</span><span>После еды</span></label>
+          </div>
+
+          <label>Значение, ммоль/л</label>
+          <input name="value" type="number" step="0.1" min="0.1" max="100" inputmode="decimal" required>
+          <p class="field-hint" id="hint-glucose"></p>
+
+          <label>Дата и время</label>
+          <input name="measured_at" type="datetime-local" class="dt">
+
+          <label>Комментарий</label>
+          <textarea name="comment" maxlength="1000"></textarea>
+
+          <button type="submit">Сохранить</button>
+          <div class="message" id="glucose-msg"></div>
+        </form>
+      </details>
+    </div>
+
+    <div class="card" id="card-vitals">
+   <details>
+
+     <summary>💓 Давление и пульс</summary><form id="vitals-form">
+          <button type="button" class="quick-repeat" onclick="repeatLast('vitals', event)">↻ Повторить последнее</button>
+
+          <div class="row">
+            <div>
+              <label>Систолическое</label>
+              <input name="systolic" type="number" min="30" max="400" inputmode="numeric" required>
+              <p class="field-hint" id="hint-systolic"></p>
+            </div>
+            <div>
+              <label>Диастолическое</label>
+              <input name="diastolic" type="number" min="10" max="300" inputmode="numeric" required>
+              <p class="field-hint" id="hint-diastolic"></p>
+            </div>
+          </div>
+
+          <label>Пульс</label>
+          <input name="pulse" type="number" min="20" max="300" inputmode="numeric">
+          <p class="field-hint" id="hint-pulse"></p>
+
+          <label>Дата и время</label>
+          <input name="measured_at" type="datetime-local" class="dt">
+
+          <label>Комментарий</label>
+          <textarea name="comment" maxlength="1000"></textarea>
+
+          <button type="submit">Сохранить</button>
+          <div class="message" id="vitals-msg"></div>
+        </form>
+      </details>
+    </div>
+
+    <div class="card" id="card-food">
+   <details>
+     <summary>🥗 Питание</summary><form id="food-form">
+          <button type="button" class="quick-repeat" onclick="repeatLast('food', event)">↻ Повторить последнее</button>
+
+          <label>Продукт</label>
+          <input name="food_name" maxlength="150" required>
+
+          <div class="row">
+            <div>
+              <label>Количество</label>
+              <input name="amount_value" type="number" step="0.01" min="0.01" inputmode="decimal" required>
+            </div>
+            <div>
+              <label>Единица</label>
+              <select name="amount_unit">
+                <option value="г">г</option>
+                <option value="мл">мл</option>
+                <option value="шт">шт</option>
+                <option value="порция">порция</option>
+              </select>
+            </div>
+          </div>
+
+          <label>Дата и время</label>
+          <input name="consumed_at" type="datetime-local" class="dt">
+
+          <label>Комментарий</label>
+          <textarea name="comment" maxlength="1000"></textarea>
+
+          <button type="submit">Сохранить</button>
+          <div class="message" id="food-msg"></div>
+        </form>
+      </details>
+    </div>
+    </div>
+
+    <div id="page-history" class="tab-page" hidden>
     <div class="card" id="edit-card" hidden>
       <div class="edit-title" id="edit-title">✏️ Редактирование</div>
 
@@ -2232,95 +2733,6 @@ APP_HTML = """<!doctype html>
       <div class="message" id="edit-msg"></div>
     </div>
 
-    <div class="card" id="card-glucose">
-   <details>
-     <summary>🩸 Глюкоза</summary><form id="glucose-form">
-          <label>Тип измерения</label>
-          <div class="button-group" role="radiogroup" aria-label="Тип измерения глюкозы">
-            <input type="radio" id="gt_fasting" name="glucose_type" value="fasting" checked>
-            <label for="gt_fasting"><span class="emoji">🌅</span><span>Натощак</span></label>
-            <input type="radio" id="gt_postmeal" name="glucose_type" value="post_meal">
-            <label for="gt_postmeal"><span class="emoji">🍽️</span><span>После еды</span></label>
-          </div>
-
-          <label>Значение, ммоль/л</label>
-          <input name="value" type="number" step="0.1" min="0.1" max="100" inputmode="decimal" required>
-
-          <label>Дата и время</label>
-          <input name="measured_at" type="datetime-local" class="dt">
-
-          <label>Комментарий</label>
-          <textarea name="comment" maxlength="1000"></textarea>
-
-          <button type="submit">Сохранить</button>
-          <div class="message" id="glucose-msg"></div>
-        </form>
-      </details>
-    </div>
-
-    <div class="card" id="card-vitals">
-   <details>
-     <summary>💓 Давление и пульс</summary><form id="vitals-form">
-          <div class="row">
-            <div>
-              <label>Систолическое</label>
-              <input name="systolic" type="number" min="30" max="400" inputmode="numeric" required>
-            </div>
-            <div>
-              <label>Диастолическое</label>
-              <input name="diastolic" type="number" min="10" max="300" inputmode="numeric" required>
-            </div>
-          </div>
-
-          <label>Пульс</label>
-          <input name="pulse" type="number" min="20" max="300" inputmode="numeric">
-
-          <label>Дата и время</label>
-          <input name="measured_at" type="datetime-local" class="dt">
-
-          <label>Комментарий</label>
-          <textarea name="comment" maxlength="1000"></textarea>
-
-          <button type="submit">Сохранить</button>
-          <div class="message" id="vitals-msg"></div>
-        </form>
-      </details>
-    </div>
-
-    <div class="card" id="card-food">
-   <details>
-     <summary>🥗 Питание</summary><form id="food-form">
-          <label>Продукт</label>
-          <input name="food_name" maxlength="150" required>
-
-          <div class="row">
-            <div>
-              <label>Количество</label>
-              <input name="amount_value" type="number" step="0.01" min="0.01" inputmode="decimal" required>
-            </div>
-            <div>
-              <label>Единица</label>
-              <select name="amount_unit">
-                <option value="г">г</option>
-                <option value="мл">мл</option>
-                <option value="шт">шт</option>
-                <option value="порция">порция</option>
-              </select>
-            </div>
-          </div>
-
-          <label>Дата и время</label>
-          <input name="consumed_at" type="datetime-local" class="dt">
-
-          <label>Комментарий</label>
-          <textarea name="comment" maxlength="1000"></textarea>
-
-          <button type="submit">Сохранить</button>
-          <div class="message" id="food-msg"></div>
-        </form>
-      </details>
-    </div>
-
     <div class="card">
       <details>
         <summary>📋 История</summary>
@@ -2361,10 +2773,21 @@ APP_HTML = """<!doctype html>
         <button type="button" id="export-btn" class="button" onclick="openPdfViewer()">📄 Выгрузить PDF</button>
 
         <div class="legend">
-          <span class="dot" style="background:#fff3c4"></span> ниже нормы ·
+          <span class="dot" style="background:#fff3c4"></span> ▼ ниже нормы ·
           <span class="dot" style="background:#d9f2d9"></span> норма ·
-          <span class="dot" style="background:#fbd9d9"></span> выше нормы.<br>
-          Подсветка опирается на общестатистические нормы и не является диагнозом.
+          <span class="dot" style="background:#fbd9d9"></span> ▲ выше нормы.<br>
+          Подсветка опирается на общестатистические (или заданные вами в настройках) нормы и не является диагнозом.
+        </div>
+
+        <div class="trend-chart-wrap" id="trend-glucose-wrap" hidden>
+          <div class="trend-chart-title">🩸 Глюкоза, ммоль/л</div>
+          <canvas id="trend-glucose"></canvas>
+          <p class="chart-legend">● натощак &nbsp;·&nbsp; ■ после еды &nbsp;·&nbsp; зелёным — целевой диапазон &nbsp;·&nbsp; синий — в норме, красный — вне диапазона</p>
+        </div>
+        <div class="trend-chart-wrap" id="trend-vitals-wrap" hidden>
+          <div class="trend-chart-title">💓 Давление, мм рт. ст.</div>
+          <canvas id="trend-vitals"></canvas>
+          <p class="chart-legend">● систолическое &nbsp;·&nbsp; ■ диастолическое &nbsp;·&nbsp; зелёным — целевой диапазон &nbsp;·&nbsp; синий — в норме, красный — вне диапазона</p>
         </div>
 
         <div class="message" id="history-msg"></div>
@@ -2384,8 +2807,9 @@ APP_HTML = """<!doctype html>
         </div>
       </details>
     </div>
+    </div>
 
-    
+    <div id="page-settings" class="tab-page" hidden>
 <div class="card">
   <details>
     <summary>ℹ️ О программе</summary>
@@ -2434,6 +2858,10 @@ APP_HTML = """<!doctype html>
       <details>
         <summary>⚙️ Настройки</summary>
         <div class="settings-section">
+          <div class="settings-title">Оформление</div>
+          <label class="switch-row"><span>🌙 Тёмная тема</span><input type="checkbox" id="theme-toggle" onchange="onThemeToggleChange(this)"><span class="switch"></span></label>
+        </div>
+        <div class="settings-section">
           <div class="settings-title">Блоки на главной странице</div>
           <label class="switch-row"><span>🩸 Глюкоза</span><input type="checkbox" id="set-glucose" checked><span class="switch"></span></label>
           <label class="switch-row"><span>💓 Давление и пульс</span><input type="checkbox" id="set-vitals" checked><span class="switch"></span></label>
@@ -2446,6 +2874,19 @@ APP_HTML = """<!doctype html>
           <label class="switch-row"><span id="wa-toggle-label">Вход по биометрии</span><input type="checkbox" id="wa-toggle" onchange="onWaToggleChange(this)"><span class="switch"></span></label>
           <p class="muted" id="wa-availability"></p>
           <div class="message" id="wa-msg"></div>
+        </div>
+        <div class="settings-section">
+          <div class="settings-title">Персональные диапазоны нормы</div>
+          <p class="muted">Используются только для справочной подсветки значений — не для диагностики. Если врач указал вам другие целевые значения, впишите их здесь. Значения сохраняются автоматически.</p>
+          <label class="switch-row"><span>Использовать значения по умолчанию</span><input type="checkbox" id="ranges-default-toggle" onchange="onRangesDefaultToggleChange(this)"><span class="switch"></span></label>
+          <div id="range-inputs">
+            <div class="range-row"><span>Глюкоза натощак, ммоль/л</span><input type="number" step="0.1" id="range-glucose_fasting-low" oninput="scheduleSaveRanges()"><input type="number" step="0.1" id="range-glucose_fasting-high" oninput="scheduleSaveRanges()"></div>
+            <div class="range-row"><span>Глюкоза после еды, ммоль/л</span><input type="number" step="0.1" id="range-glucose_post-low" oninput="scheduleSaveRanges()"><input type="number" step="0.1" id="range-glucose_post-high" oninput="scheduleSaveRanges()"></div>
+            <div class="range-row"><span>Систолическое, мм рт. ст.</span><input type="number" step="1" id="range-systolic-low" oninput="scheduleSaveRanges()"><input type="number" step="1" id="range-systolic-high" oninput="scheduleSaveRanges()"></div>
+            <div class="range-row"><span>Диастолическое, мм рт. ст.</span><input type="number" step="1" id="range-diastolic-low" oninput="scheduleSaveRanges()"><input type="number" step="1" id="range-diastolic-high" oninput="scheduleSaveRanges()"></div>
+            <div class="range-row"><span>Пульс, уд/мин</span><input type="number" step="1" id="range-pulse-low" oninput="scheduleSaveRanges()"><input type="number" step="1" id="range-pulse-high" oninput="scheduleSaveRanges()"></div>
+          </div>
+          <div class="message" id="ranges-msg"></div>
         </div>
       </details>
     </div>
@@ -2500,8 +2941,36 @@ APP_HTML = """<!doctype html>
         </div>
       </details>
     </div>
+
+    <div class="card">
+      <details>
+        <summary>🗄️ Резервные копии БД</summary>
+        <p class="muted" id="backup-status">Загрузка статуса…</p>
+        <button type="button" onclick="runBackupNow()">Снять копию сейчас</button>
+        <div class="message" id="backup-msg"></div>
+        <div class="table-wrap">
+          <table id="backup-table">
+            <thead><tr><th>Файл</th><th>Создан</th><th>Размер</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </details>
+    </div>
     {% endif %}
+    </div>
   </main>
+
+  <nav class="tab-bar">
+    <button type="button" class="tab-btn" id="tab-btn-input" onclick="showPage('input')">
+      <span class="tab-icon">📝</span><span>Ввод</span>
+    </button>
+    <button type="button" class="tab-btn" id="tab-btn-history" onclick="showPage('history')">
+      <span class="tab-icon">📊</span><span>История</span>
+    </button>
+    <button type="button" class="tab-btn" id="tab-btn-settings" onclick="showPage('settings')">
+      <span class="tab-icon">⚙️</span><span>Ещё</span>
+    </button>
+  </nav>
 
   <div id="pdf-overlay" hidden>
     <div class="pdf-toolbar">
@@ -2522,6 +2991,8 @@ APP_HTML = """<!doctype html>
     var IS_ADMIN = {{ is_admin }};
     var USER_ID = {{ user_id }};
 var USER_SETTINGS = {{ settings_json | safe }};
+var RANGES = {{ ranges_json | safe }};
+var DEFAULT_RANGES_JS = {{ default_ranges_json | safe }};
 
 function applySettings(s) {
   var map = { glucose: 'card-glucose', vitals: 'card-vitals', food: 'card-food' };
@@ -2552,6 +3023,214 @@ function bindSettings() {
 
 applySettings(USER_SETTINGS || {});
 bindSettings();
+
+var THEME_KEY = 'medical_diary_theme';
+
+function isThemeDark() {
+  var stored = null;
+  try { stored = localStorage.getItem(THEME_KEY); } catch (e) {}
+  if (stored) { return stored === 'dark'; }
+  return !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+}
+
+function applyTheme() {
+  var dark = isThemeDark();
+  document.documentElement.classList.toggle('theme-dark', dark);
+  var toggle = document.getElementById('theme-toggle');
+  if (toggle) { toggle.checked = dark; }
+}
+
+function onThemeToggleChange(el) {
+  try { localStorage.setItem(THEME_KEY, el.checked ? 'dark' : 'light'); } catch (e) {}
+  applyTheme();
+}
+
+applyTheme();
+if (window.matchMedia) {
+  // Если пользователь не выбирал тему вручную, продолжаем следовать
+  // системной теме даже после смены системной настройки "на лету".
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', function() {
+    var stored = null;
+    try { stored = localStorage.getItem(THEME_KEY); } catch (e) {}
+    if (!stored) { applyTheme(); }
+  });
+}
+
+function showToast(text, ok) {
+  var bubble = document.getElementById('toast-bubble');
+  if (!bubble) return;
+  bubble.textContent = text;
+  bubble.className = 'toast-bubble show ' + (ok ? 'ok' : 'error');
+  if (ok && navigator.vibrate) { try { navigator.vibrate(15); } catch (e) {} }
+  clearTimeout(showToast._t);
+  showToast._t = setTimeout(function() { bubble.className = 'toast-bubble'; }, 2200);
+}
+
+var TAB_PAGES = ['input', 'history', 'settings'];
+function showPage(name) {
+  TAB_PAGES.forEach(function(p) {
+    var pageEl = document.getElementById('page-' + p);
+    var btnEl = document.getElementById('tab-btn-' + p);
+    if (pageEl) { pageEl.hidden = (p !== name); }
+    if (btnEl) { btnEl.classList.toggle('active', p === name); }
+  });
+  try { localStorage.setItem('medical_diary_active_tab', name); } catch (e) {}
+  if (name === 'history') { loadHistory(); }
+}
+(function() {
+  var saved = 'input';
+  try { saved = localStorage.getItem('medical_diary_active_tab') || 'input'; } catch (e) {}
+  if (TAB_PAGES.indexOf(saved) === -1) { saved = 'input'; }
+  showPage(saved);
+})();
+
+function fmtRangeVal(n) {
+  return (Math.round(n * 10) / 10).toString();
+}
+
+function updateGlucoseHint() {
+  var el = document.getElementById('hint-glucose');
+  if (!el) return;
+  var checked = document.querySelector('input[name="glucose_type"]:checked');
+  var key = (checked && checked.value === 'post_meal') ? 'glucose_post' : 'glucose_fasting';
+  var r = RANGES[key];
+  el.textContent = r ? ('Обычно ' + fmtRangeVal(r[0]) + '–' + fmtRangeVal(r[1]) + ' ммоль/л') : '';
+}
+document.querySelectorAll('input[name="glucose_type"]').forEach(function(el) {
+  el.addEventListener('change', updateGlucoseHint);
+});
+updateGlucoseHint();
+
+function updateVitalsHints() {
+  var pairs = [['hint-systolic', 'systolic'], ['hint-diastolic', 'diastolic'], ['hint-pulse', 'pulse']];
+  pairs.forEach(function(pair) {
+    var el = document.getElementById(pair[0]);
+    var r = RANGES[pair[1]];
+    if (el && r) { el.textContent = 'Обычно ' + fmtRangeVal(r[0]) + '–' + fmtRangeVal(r[1]); }
+  });
+}
+updateVitalsHints();
+
+async function repeatLast(type, ev) {
+  if (ev) { ev.preventDefault(); }
+  try {
+    var res = await fetch('/api/last?type=' + type);
+    var out = await res.json();
+    if (!res.ok) throw new Error(out.error || 'HTTP ' + res.status);
+    if (!out.found) { showToast('Пока нет предыдущих записей этого типа', false); return; }
+    if (type === 'glucose') {
+      var radio = document.querySelector('input[name="glucose_type"][value="' + out.glucose_type + '"]');
+      if (radio) { radio.checked = true; updateGlucoseHint(); }
+      document.querySelector('#glucose-form [name="value"]').value = out.value;
+      document.querySelector('#glucose-form [name="comment"]').value = out.comment || '';
+    } else if (type === 'vitals') {
+      document.querySelector('#vitals-form [name="systolic"]').value = out.systolic;
+      document.querySelector('#vitals-form [name="diastolic"]').value = out.diastolic;
+      document.querySelector('#vitals-form [name="pulse"]').value = out.pulse != null ? out.pulse : '';
+      document.querySelector('#vitals-form [name="comment"]').value = out.comment || '';
+    } else {
+      document.querySelector('#food-form [name="food_name"]').value = out.food_name;
+      document.querySelector('#food-form [name="amount_value"]').value = out.amount_value;
+      document.querySelector('#food-form [name="amount_unit"]').value = out.amount_unit;
+      document.querySelector('#food-form [name="comment"]').value = out.comment || '';
+    }
+    showToast('Поля заполнены последней записью — проверьте перед сохранением', true);
+  } catch (err) {
+    showToast(err.message, false);
+  }
+}
+
+var RANGE_KEYS = ['glucose_fasting', 'glucose_post', 'systolic', 'diastolic', 'pulse'];
+
+function setRangeInputsDisabled(disabled) {
+  RANGE_KEYS.forEach(function(k) {
+    var lowEl = document.getElementById('range-' + k + '-low');
+    var highEl = document.getElementById('range-' + k + '-high');
+    if (lowEl) { lowEl.disabled = disabled; }
+    if (highEl) { highEl.disabled = disabled; }
+  });
+}
+
+function fillRangeInputsFrom(rangesObj) {
+  RANGE_KEYS.forEach(function(k) {
+    var r = rangesObj[k];
+    if (!r) { return; }
+    var lowEl = document.getElementById('range-' + k + '-low');
+    var highEl = document.getElementById('range-' + k + '-high');
+    if (lowEl) { lowEl.value = r[0]; }
+    if (highEl) { highEl.value = r[1]; }
+  });
+}
+
+function populateRangeInputs() {
+  fillRangeInputsFrom(RANGES);
+  var toggle = document.getElementById('ranges-default-toggle');
+  var usingDefault = USER_SETTINGS ? (USER_SETTINGS.ranges_default !== false) : true;
+  if (toggle) { toggle.checked = usingDefault; }
+  setRangeInputsDisabled(usingDefault);
+}
+populateRangeInputs();
+
+function collectRangeInputs() {
+  var ranges = {};
+  for (var i = 0; i < RANGE_KEYS.length; i++) {
+    var k = RANGE_KEYS[i];
+    var low = parseFloat(document.getElementById('range-' + k + '-low').value);
+    var high = parseFloat(document.getElementById('range-' + k + '-high').value);
+    if (isNaN(low) || isNaN(high)) { return null; }
+    ranges[k] = [low, high];
+  }
+  return ranges;
+}
+
+async function persistSettings(payload) {
+  try {
+    var out = await sendJSON('POST', '/api/settings', payload);
+    if (out.ranges) {
+      RANGES = out.ranges;
+      updateGlucoseHint();
+      updateVitalsHints();
+    }
+    if (out.settings && ('ranges_default' in out.settings)) {
+      USER_SETTINGS.ranges_default = out.settings.ranges_default;
+    }
+    setMsg('ranges-msg', 'Сохранено', true);
+    showToast('Сохранено', true);
+  } catch (err) {
+    setMsg('ranges-msg', err.message, false);
+    showToast(err.message, false);
+  }
+}
+
+var scheduleSaveRangesTimer = null;
+function scheduleSaveRanges() {
+  clearTimeout(scheduleSaveRangesTimer);
+  scheduleSaveRangesTimer = setTimeout(function() {
+    var ranges = collectRangeInputs();
+    if (!ranges) {
+      setMsg('ranges-msg', 'Заполните оба значения для всех диапазонов', false);
+      return;
+    }
+    persistSettings({ ranges: ranges, ranges_default: false });
+  }, 700);
+}
+
+function onRangesDefaultToggleChange(el) {
+  if (el.checked) {
+    // Не отправляем "ranges" вовсе — сохранённые персональные значения
+    // на сервере остаются нетронутыми, просто временно не используются.
+    fillRangeInputsFrom(DEFAULT_RANGES_JS);
+    setRangeInputsDisabled(true);
+    RANGES = JSON.parse(JSON.stringify(DEFAULT_RANGES_JS));
+    updateGlucoseHint();
+    updateVitalsHints();
+    persistSettings({ ranges_default: true });
+  } else {
+    setRangeInputsDisabled(false);
+    var ranges = collectRangeInputs();
+    persistSettings({ ranges: ranges, ranges_default: false });
+  }
+}
 
     function pad(n) { return String(n).padStart(2, '0'); }
 
@@ -2631,11 +3310,12 @@ function updateDateLabels() {
           measured_at: f.measured_at.value.replace('T', ' '),
           comment: f.comment.value
         });
-        setMsg('glucose-msg', 'Сохранено', true);
+        setMsg('glucose-msg', '', true);
+        showToast('Запись глюкозы сохранена', true);
         f.value.value = '';
         f.comment.value = '';
         loadHistory();
-      } catch (err) { setMsg('glucose-msg', err.message, false); }
+      } catch (err) { setMsg('glucose-msg', err.message, false); showToast(err.message, false); }
     });
 
     document.getElementById('vitals-form').addEventListener('submit', async function(e) {
@@ -2649,10 +3329,11 @@ function updateDateLabels() {
           measured_at: f.measured_at.value.replace('T', ' '),
           comment: f.comment.value
         });
-        setMsg('vitals-msg', 'Сохранено', true);
+        setMsg('vitals-msg', '', true);
+        showToast('Запись давления/пульса сохранена', true);
         f.comment.value = '';
         loadHistory();
-      } catch (err) { setMsg('vitals-msg', err.message, false); }
+      } catch (err) { setMsg('vitals-msg', err.message, false); showToast(err.message, false); }
     });
 
     document.getElementById('food-form').addEventListener('submit', async function(e) {
@@ -2666,12 +3347,13 @@ function updateDateLabels() {
           consumed_at: f.consumed_at.value.replace('T', ' '),
           comment: f.comment.value
         });
-        setMsg('food-msg', 'Сохранено', true);
+        setMsg('food-msg', '', true);
+        showToast('Запись о питании сохранена', true);
         f.food_name.value = '';
         f.amount_value.value = '';
         f.comment.value = '';
         loadHistory();
-      } catch (err) { setMsg('food-msg', err.message, false); }
+      } catch (err) { setMsg('food-msg', err.message, false); showToast(err.message, false); }
     });
 
     function historyParams() {
@@ -2683,19 +3365,215 @@ function updateDateLabels() {
       };
     }
 
+    function fmtDateRu(v) {
+      if (!v) return '';
+      var d = v.substring(0, 10).split('-');
+      var m = parseInt(d[1], 10) - 1;
+      return d[2] + ' ' + MONTHS_RU_SHORT[m] + ' ' + d[0].substring(2) + ' г.';
+    }
+
+    var STATUS_LINE_COLORS = { ok: '#007aff', low: '#ff3b30', high: '#ff3b30' };
+    var BAND_COLOR_OUTER = 'rgba(180,235,150,0.40)';
+    var BAND_COLOR_INNER = 'rgba(140,220,130,0.55)';
+
+    function fmtDayTick(ts) {
+      var d = new Date(ts);
+      return pad(d.getDate()) + '.' + pad(d.getMonth() + 1);
+    }
+
+    function drawLineChart(canvas, series, bands) {
+      if (!canvas) return;
+      var dpr = window.devicePixelRatio || 1;
+      var cssWidth = canvas.clientWidth || (canvas.parentElement && canvas.parentElement.clientWidth) || 300;
+      var cssHeight = 150;
+      canvas.width = cssWidth * dpr;
+      canvas.height = cssHeight * dpr;
+      canvas.style.height = cssHeight + 'px';
+      var ctx = canvas.getContext('2d');
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, cssWidth, cssHeight);
+
+      var allPoints = [];
+      series.forEach(function(s) { allPoints = allPoints.concat(s.points); });
+      if (allPoints.length === 0) { return; }
+
+      var xs = allPoints.map(function(p) { return p.x; });
+      var ys = allPoints.map(function(p) { return p.y; });
+      (bands || []).forEach(function(b) { ys.push(b.low); ys.push(b.high); });
+      var minX = Math.min.apply(null, xs), maxX = Math.max.apply(null, xs);
+      var minY = Math.min.apply(null, ys), maxY = Math.max.apply(null, ys);
+      if (minX === maxX) { minX -= 1; maxX += 1; }
+      if (minY === maxY) { minY -= 1; maxY += 1; }
+      var padY = (maxY - minY) * 0.15;
+      minY -= padY; maxY += padY;
+
+      var spanDays = (maxX - minX) / 86400000;
+      var padding = { left: 34, right: 8, top: 10, bottom: 18 };
+      var plotW = cssWidth - padding.left - padding.right;
+      var plotH = cssHeight - padding.top - padding.bottom;
+      function px(x) { return padding.left + (x - minX) / (maxX - minX) * plotW; }
+      function py(y) { return padding.top + (1 - (y - minY) / (maxY - minY)) * plotH; }
+
+      (bands || []).forEach(function(b) {
+        var yTop = py(b.high), yBot = py(b.low);
+        ctx.fillStyle = b.color;
+        ctx.fillRect(padding.left, yTop, plotW, Math.max(1, yBot - yTop));
+      });
+
+      ctx.strokeStyle = '#e5e5ea';
+      ctx.lineWidth = 1;
+      ctx.fillStyle = '#8e8e93';
+      ctx.font = '11px -apple-system, BlinkMacSystemFont, sans-serif';
+      for (var i = 0; i <= 2; i++) {
+        var val = minY + (maxY - minY) * i / 2;
+        var yy = py(val);
+        ctx.beginPath();
+        ctx.moveTo(padding.left, yy);
+        ctx.lineTo(cssWidth - padding.right, yy);
+        ctx.stroke();
+        ctx.fillText(fmtRangeVal(val), 2, yy + 4);
+      }
+
+      series.forEach(function(s) {
+        if (s.points.length === 0) return;
+        ctx.lineWidth = 2;
+        for (var j = 0; j < s.points.length - 1; j++) {
+          var p1 = s.points[j], p2 = s.points[j + 1];
+          ctx.strokeStyle = STATUS_LINE_COLORS[p1.status] || '#007aff';
+          ctx.beginPath();
+          ctx.moveTo(px(p1.x), py(p1.y));
+          ctx.lineTo(px(p2.x), py(p2.y));
+          ctx.stroke();
+        }
+        s.points.forEach(function(p) {
+          ctx.fillStyle = STATUS_LINE_COLORS[p.status] || '#007aff';
+          ctx.beginPath();
+          if (s.shape === 'square') {
+            ctx.fillRect(px(p.x) - 3, py(p.y) - 3, 6, 6);
+          } else {
+            ctx.arc(px(p.x), py(p.y), 3, 0, 2 * Math.PI);
+            ctx.fill();
+          }
+        });
+      });
+
+      ctx.fillStyle = '#8e8e93';
+      if (spanDays <= 10) {
+        // Короткий период — подписываем каждый день на оси X.
+        var dayCount = Math.round(spanDays) + 1;
+        var oneDay = 86400000;
+        var startDay = new Date(minX); startDay.setHours(0, 0, 0, 0);
+        var lastLabelX = -1000;
+        for (var d = 0; d < dayCount; d++) {
+          var ts = startDay.getTime() + d * oneDay;
+          if (ts < minX - oneDay || ts > maxX + oneDay) { continue; }
+          var xx = px(Math.max(minX, Math.min(maxX, ts)));
+          if (xx - lastLabelX < 30) { continue; }
+          lastLabelX = xx;
+          ctx.textAlign = 'center';
+          ctx.fillText(fmtDayTick(ts), Math.min(Math.max(xx, padding.left + 14), cssWidth - padding.right - 14), cssHeight - 4);
+        }
+      } else {
+        ctx.textAlign = 'left';
+        ctx.fillText(fmtDayTick(minX), padding.left, cssHeight - 4);
+        ctx.textAlign = 'right';
+        ctx.fillText(fmtDayTick(maxX), cssWidth - padding.right, cssHeight - 4);
+      }
+      ctx.textAlign = 'left';
+    }
+
+    function toTimestamp(v) {
+      return new Date(v.replace(' ', 'T')).getTime();
+    }
+
+    function renderTrendCharts(entries) {
+      var fastingPoints = entries
+        .filter(function(e) { return e.type === 'glucose' && e.glucose_type === 'fasting'; })
+        .map(function(e) { return { x: toTimestamp(e.measured_at), y: e.value_mmol_l, status: e.status }; })
+        .sort(function(a, b) { return a.x - b.x; });
+      var postPoints = entries
+        .filter(function(e) { return e.type === 'glucose' && e.glucose_type === 'post_meal'; })
+        .map(function(e) { return { x: toTimestamp(e.measured_at), y: e.value_mmol_l, status: e.status }; })
+        .sort(function(a, b) { return a.x - b.x; });
+
+      var gWrap = document.getElementById('trend-glucose-wrap');
+      var hasGlucose = (fastingPoints.length + postPoints.length) >= 2;
+      if (gWrap) { gWrap.hidden = !hasGlucose; }
+      if (hasGlucose) {
+        var gBands = [];
+        if (RANGES.glucose_post) { gBands.push({ low: RANGES.glucose_post[0], high: RANGES.glucose_post[1], color: BAND_COLOR_OUTER }); }
+        if (RANGES.glucose_fasting) { gBands.push({ low: RANGES.glucose_fasting[0], high: RANGES.glucose_fasting[1], color: BAND_COLOR_INNER }); }
+        drawLineChart(document.getElementById('trend-glucose'), [
+          { points: fastingPoints, shape: 'circle' },
+          { points: postPoints, shape: 'square' }
+        ], gBands);
+      }
+
+      var sysPoints = [], diaPoints = [];
+      entries.filter(function(e) { return e.type === 'vitals'; }).forEach(function(e) {
+        var t = toTimestamp(e.measured_at);
+        sysPoints.push({ x: t, y: e.systolic_mmhg, status: e.systolic_status });
+        diaPoints.push({ x: t, y: e.diastolic_mmhg, status: e.diastolic_status });
+      });
+      sysPoints.sort(function(a, b) { return a.x - b.x; });
+      diaPoints.sort(function(a, b) { return a.x - b.x; });
+
+      var vWrap = document.getElementById('trend-vitals-wrap');
+      var hasVitals = sysPoints.length >= 2;
+      if (vWrap) { vWrap.hidden = !hasVitals; }
+      if (hasVitals) {
+        var vBands = [];
+        if (RANGES.systolic) { vBands.push({ low: RANGES.systolic[0], high: RANGES.systolic[1], color: BAND_COLOR_OUTER }); }
+        if (RANGES.diastolic) { vBands.push({ low: RANGES.diastolic[0], high: RANGES.diastolic[1], color: BAND_COLOR_INNER }); }
+        drawLineChart(document.getElementById('trend-vitals'), [
+          { points: sysPoints, shape: 'circle' },
+          { points: diaPoints, shape: 'square' }
+        ], vBands);
+      }
+    }
+
     async function loadHistory() {
       var hp = historyParams();
       var df = hp.df;
       var dt = hp.dt;
+      var tbody = document.querySelector('#history-table tbody');
+      tbody.innerHTML = '<tr class="history-empty"><td colspan="4">Загрузка…</td></tr>';
       try {
         var res = await fetch('/api/history?date_from=' + encodeURIComponent(df) + '&date_to=' + encodeURIComponent(dt) + '&type=' + encodeURIComponent(hp.type) + '&sort=' + encodeURIComponent(hp.sort));
         if (res.status === 401) { window.location = '/login'; return; }
         var out = await res.json();
         if (!res.ok) { throw new Error(out.error || ('HTTP ' + res.status)); }
 
-        var tbody = document.querySelector('#history-table tbody');
         tbody.innerHTML = '';
+
+        if (out.entries.length === 0) {
+          var emptyRow = document.createElement('tr');
+          emptyRow.className = 'history-empty';
+          var emptyTd = document.createElement('td');
+          emptyTd.colSpan = 4;
+          emptyTd.textContent = 'Нет записей за выбранный период';
+          emptyRow.appendChild(emptyTd);
+          tbody.appendChild(emptyRow);
+        }
+
+        var lastDay = null;
+        var groupByDay = (hp.sort === 'date');
+
         out.entries.forEach(function(entry) {
+          if (groupByDay) {
+            var day = (entry.measured_at || '').substring(0, 10);
+            if (day !== lastDay) {
+              lastDay = day;
+              var dayTr = document.createElement('tr');
+              dayTr.className = 'day-row';
+              var dayTd = document.createElement('td');
+              dayTd.colSpan = 4;
+              dayTd.textContent = fmtDateRu(day);
+              dayTr.appendChild(dayTd);
+              tbody.appendChild(dayTr);
+            }
+          }
+
           var tr = document.createElement('tr');
 
           var td1 = document.createElement('td');
@@ -2732,9 +3610,14 @@ function updateDateLabels() {
           tbody.appendChild(tr);
         });
 
+        renderTrendCharts(out.entries);
+
         currentExportUrl = '/export.pdf?date_from=' + encodeURIComponent(df) + '&date_to=' + encodeURIComponent(dt) + '&type=' + encodeURIComponent(hp.type) + '&sort=' + encodeURIComponent(hp.sort);
         setMsg('history-msg', 'Записей: ' + out.entries.length, true);
-      } catch (err) { setMsg('history-msg', err.message, false); }
+      } catch (err) {
+        tbody.innerHTML = '';
+        setMsg('history-msg', err.message, false);
+      }
     }
 
     async function loadUsers() {
@@ -2842,6 +3725,62 @@ function updateDateLabels() {
       });
       loadUsers();
     }
+
+    async function loadBackupStatus() {
+      if (!IS_ADMIN) return;
+      try {
+        var res = await fetch('/api/admin/backups');
+        if (res.status === 401) { window.location = '/login'; return; }
+        var out = await res.json();
+        if (!res.ok) { throw new Error(out.error || ('HTTP ' + res.status)); }
+
+        var statusEl = document.getElementById('backup-status');
+        if (statusEl) {
+          statusEl.textContent = out.enabled
+            ? ('Автобэкап включён: каждый день в ' + out.scheduled_time + ' (время сервера), хранение ' + out.retention_days + ' дн., папка ' + out.backup_dir)
+            : 'Автобэкап отключён на сервере (BACKUP_ENABLED=false)';
+        }
+
+        var tbody = document.querySelector('#backup-table tbody');
+        tbody.innerHTML = '';
+        if (out.backups.length === 0) {
+          var tr0 = document.createElement('tr');
+          var td0 = document.createElement('td');
+          td0.colSpan = 3;
+          td0.textContent = 'Копий пока нет';
+          tr0.appendChild(td0);
+          tbody.appendChild(tr0);
+        }
+        out.backups.forEach(function(b) {
+          var tr = document.createElement('tr');
+          var td1 = document.createElement('td');
+          td1.textContent = b.name;
+          tr.appendChild(td1);
+          var td2 = document.createElement('td');
+          td2.textContent = b.created_at;
+          tr.appendChild(td2);
+          var td3 = document.createElement('td');
+          td3.textContent = (b.size_bytes / (1024 * 1024)).toFixed(1) + ' МБ';
+          tr.appendChild(td3);
+          tbody.appendChild(tr);
+        });
+      } catch (err) {
+        setMsg('backup-msg', err.message, false);
+      }
+    }
+
+    async function runBackupNow() {
+      try {
+        var out = await sendJSON('POST', '/api/admin/backups/run', {});
+        setMsg('backup-msg', 'Копия создана: ' + out.file, true);
+        showToast('Резервная копия создана', true);
+        loadBackupStatus();
+      } catch (err) {
+        setMsg('backup-msg', err.message, false);
+        showToast(err.message, false);
+      }
+    }
+    loadBackupStatus();
 
     var userEditForm = document.getElementById('user-edit-form');
     if (userEditForm) {
@@ -3090,11 +4029,13 @@ function updateDateLabels() {
 
       try {
         await sendJSON('PATCH', url, payload);
-        setMsg('edit-msg', 'Сохранено', true);
+        setMsg('edit-msg', '', true);
+        showToast('Изменения сохранены', true);
         closeEdit();
         loadHistory();
       } catch (err) {
         setMsg('edit-msg', err.message, false);
+        showToast(err.message, false);
       }
     }
 
@@ -3108,9 +4049,11 @@ function updateDateLabels() {
 
       try {
         await sendJSON('DELETE', url, {});
+        showToast('Запись удалена', true);
         loadHistory();
       } catch (err) {
         setMsg('history-msg', err.message, false);
+        showToast(err.message, false);
       }
     }
 
