@@ -1121,7 +1121,6 @@ def query_entries(user_id, date_from=None, date_to=None, entry_type="all", sort=
                     "status": overall_st,
                     "systolic_status": st_s,
                     "diastolic_status": st_d,
-                    "pulse_status": st_p if p is not None else None,
                 }
             )
 
@@ -2317,128 +2316,754 @@ LOGIN_HTML = """<!doctype html>
 APP_HTML = """<!doctype html>
 <html lang="ru">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
-<meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="csrf-token" content="{{ csrf_token }}">
-<script>(function(){try{var t=localStorage.getItem('medical_diary_theme');var dark=t?(t==='dark'):(window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)').matches);if(dark)document.documentElement.classList.add('theme-dark')}catch(e){}})();</script>
-<title>Медицинский дневник</title>
-<link rel="apple-touch-icon" sizes="180x180" href="/apple-icon-180x180.png">
-<link rel="manifest" href="/manifest.json">
-<style>
-:root{--bg:#f4f7fb;--surface:#fff;--surface-2:#eef3f9;--surface-3:#e7edf5;--text:#182231;--muted:#708096;--faint:#9aa8b8;--border:#d7e0eb;--primary:#2f8cff;--primary-strong:#1876e8;--primary-soft:#e9f3ff;--success:#0da96b;--success-soft:#e7faf2;--warning:#d89a2b;--warning-soft:#fff5df;--danger:#e95d73;--danger-soft:#fff0f3;--glucose:#2f8cff;--vitals:#ef4f78;--food:#15b878;--shadow:0 8px 24px rgba(27,54,84,.08);--radius:18px}
-html.theme-dark{--bg:#08111d;--surface:#101b2a;--surface-2:#142238;--surface-3:#1b2a40;--text:#f3f7fc;--muted:#a7b5c8;--faint:#7789a0;--border:#29405b;--primary:#2f94ff;--primary-strong:#55a8ff;--primary-soft:#102e50;--success:#20d58a;--success-soft:#0d3426;--warning:#f0b84d;--warning-soft:#392c14;--danger:#ff7187;--danger-soft:#3a1822;--shadow:0 12px 30px rgba(0,0,0,.28)}
-*,:before,:after{box-sizing:border-box}html,body{min-height:100%;overflow-x:hidden}body{margin:0;background:radial-gradient(circle at 50% -10%,rgba(47,140,255,.08),transparent 35%),var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","Segoe UI",sans-serif;-webkit-text-size-adjust:100%;padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);overscroll-behavior-x:none}[hidden]{display:none!important}button,input,select,textarea{font:inherit}button{cursor:pointer}button:disabled{opacity:.55;cursor:wait}
-.app-shell{width:100%;max-width:760px;margin:0 auto;padding-bottom:100px}.topbar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:18px 18px 6px}.brand{min-width:0}.eyebrow{font-size:13px;font-weight:650;color:var(--muted);margin-bottom:3px}.brand-title{font-size:22px;line-height:1.1;font-weight:850;letter-spacing:-.5px}.link-btn{border:0;background:transparent;color:var(--primary-strong);font-size:13px;font-weight:800;padding:0}.user-pill{max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted);font-size:13px;font-weight:700}.header-action{width:42px;height:42px;border:1px solid var(--border);border-radius:14px;background:var(--surface);color:var(--text);font-size:20px;box-shadow:var(--shadow)}
-main{width:100%;padding:10px 16px 18px}.page-intro{margin:8px 2px 18px}.page-intro h1,.history-head h1{margin:0;font-size:32px;line-height:1.05;letter-spacing:-.8px}.page-intro p{margin:7px 0 0;color:var(--muted);font-size:14px}.section-label{display:flex;align-items:center;justify-content:space-between;margin:18px 2px 10px}.section-label strong{font-size:14px;letter-spacing:.2px}.section-label span{font-size:13px;color:var(--primary-strong);font-weight:750}
-.quick-list{display:grid;gap:10px}.quick-card{display:flex;align-items:center;gap:13px;width:100%;padding:13px 14px;border:1px solid var(--border);border-radius:17px;background:linear-gradient(145deg,var(--surface),var(--surface-2));color:var(--text);text-align:left;box-shadow:var(--shadow)}.quick-card:active{transform:scale(.99)}.quick-icon,.history-icon{width:48px;height:48px;display:grid;place-items:center;flex:0 0 48px;border-radius:50%;font-size:24px;color:#fff;box-shadow:inset 0 1px 1px rgba(255,255,255,.25)}.quick-icon.glucose,.history-icon.glucose{background:var(--glucose)}.quick-icon.vitals,.history-icon.vitals{background:var(--vitals)}.quick-icon.food,.history-icon.food{background:var(--food)}.quick-copy{min-width:0;flex:1}.quick-title{font-size:17px;font-weight:800}.quick-sub{margin-top:2px;font-size:13px;color:var(--muted)}.chevron{font-size:25px;color:var(--faint)}
-.recent-list{display:grid;gap:8px}.recent-card{display:flex;align-items:center;gap:10px;padding:11px 13px;border:1px solid var(--border);border-radius:15px;background:var(--surface);box-shadow:0 4px 14px rgba(27,54,84,.05)}.recent-copy{min-width:0;flex:1}.recent-title{font-size:14px;font-weight:800}.recent-value{margin-top:2px;font-size:13px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.recent-time{font-size:11px;color:var(--muted);align-self:flex-start}.day-summary{display:grid;grid-template-columns:repeat(4,1fr);margin-top:10px;border:1px solid var(--border);border-radius:16px;background:var(--surface);overflow:hidden}.day-stat{padding:12px 6px;text-align:center;border-right:1px solid var(--border)}.day-stat:last-child{border-right:0}.day-stat .num{font-size:18px;font-weight:850}.day-stat .label{margin-top:2px;font-size:11px;color:var(--muted)}
-.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:16px;margin-bottom:12px;box-shadow:var(--shadow);overflow:hidden}.flat{box-shadow:none}label{display:block;margin:13px 0 6px;font-size:13px;font-weight:750;color:var(--text)}input,select,textarea{display:block;width:100%;min-height:48px;border:1px solid var(--border);border-radius:13px;background:var(--surface-2);color:var(--text);padding:10px 12px;font-size:17px;outline:none}input:focus,select:focus,textarea:focus{border-color:var(--primary);box-shadow:0 0 0 3px rgba(47,140,255,.13)}textarea{min-height:82px;resize:vertical}.row{display:grid;grid-template-columns:1fr 1fr;gap:10px}.row>div{min-width:0}
-.modal{position:fixed;inset:0;z-index:80;background:rgba(4,10,18,.62);display:flex;align-items:flex-end;justify-content:center;padding:0}.modal-panel{width:100%;max-width:760px;max-height:94vh;overflow:auto;background:var(--bg);border:1px solid var(--border);border-bottom:0;border-radius:24px 24px 0 0;padding:10px 16px calc(22px + env(safe-area-inset-bottom));box-shadow:0 -18px 50px rgba(0,0,0,.28)}.modal-grabber{width:42px;height:5px;border-radius:10px;background:var(--faint);opacity:.55;margin:2px auto 13px}.modal-head{display:flex;align-items:center;gap:11px;margin-bottom:13px}.modal-title{flex:1;min-width:0}.modal-title h2{margin:0;font-size:22px;letter-spacing:-.4px}.modal-title p{margin:3px 0 0;color:var(--muted);font-size:12px}.close-btn{width:40px;height:40px;border:1px solid var(--border);border-radius:13px;background:var(--surface);color:var(--text);font-size:22px}.metric-hero{padding:17px;border:1px solid var(--border);border-radius:18px;background:linear-gradient(145deg,var(--surface),var(--surface-2));margin-bottom:12px}.metric-hero label{margin:0 0 6px}.metric-input{display:flex;align-items:baseline;gap:10px}.metric-input input{border:0;background:transparent;padding:0;min-height:64px;height:64px;font-size:56px;font-weight:850;letter-spacing:-2px;line-height:1;box-shadow:none}.metric-unit{font-size:16px;font-weight:800}.metric-status{margin-top:10px}.segmented{display:grid;grid-template-columns:1fr 1fr;gap:7px}.segmented input{position:absolute;opacity:0;pointer-events:none;width:1px;height:1px}.segmented label{display:flex;align-items:center;justify-content:center;min-height:46px;margin:0;padding:8px;border:1px solid var(--border);border-radius:13px;background:var(--surface-2);font-size:14px}.segmented input:checked+label{background:var(--primary);border-color:var(--primary);color:#fff}.field-hint{margin:5px 0 0;color:var(--muted);font-size:11px}.quick-repeat{width:100%;min-height:46px;margin-top:10px;border:1px solid var(--border);border-radius:13px;background:var(--surface-2);color:var(--primary-strong);font-weight:750}.primary-action{width:100%;min-height:52px;margin-top:12px;border:0;border-radius:14px;background:var(--primary);color:#fff;font-size:16px;font-weight:800;box-shadow:0 7px 18px rgba(47,140,255,.22)}
-.vitals-entry{display:grid;grid-template-columns:1fr 1fr;gap:10px}.bp-field{padding:13px;border:1px solid var(--border);border-radius:16px;background:var(--surface-2)}.bp-field .bp-caption{font-size:12px;color:var(--muted);font-weight:700}.bp-field input{margin-top:4px;min-height:58px;padding:4px 0;border:0;background:transparent;font-size:40px;font-weight:850;letter-spacing:-1px;box-shadow:none}.pulse-field{margin-top:10px}
-.food-line{padding:13px;border:1px solid var(--border);border-radius:15px;background:var(--surface-2)}
-.history-head{display:flex;align-items:flex-end;justify-content:space-between;gap:10px;margin:8px 2px 15px}.history-count{margin-top:5px;color:var(--success);font-size:13px;font-weight:800}.filter-toggle{min-height:40px;padding:0 12px;border:1px solid var(--border);border-radius:12px;background:var(--surface);color:var(--text);font-weight:750}.history-filters{padding:12px}.filter-title{font-size:12px;font-weight:800;color:var(--muted);margin-bottom:8px}.date-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}.date-btn{position:relative;display:flex;align-items:center;gap:7px;min-height:43px;margin:0;padding:8px 10px;border:1px solid var(--border);border-radius:11px;background:var(--surface-2);font-size:13px;font-weight:700;overflow:hidden}.date-btn input{position:absolute;inset:0;opacity:0;min-height:0;margin:0}.date-val{color:var(--primary-strong);white-space:nowrap}.preset-row{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:8px}.preset-btn{min-height:38px;border:1px solid var(--border);border-radius:10px;background:var(--surface);color:var(--text);font-size:12px;font-weight:800}.preset-btn:first-child{background:var(--primary);border-color:var(--primary);color:#fff}.history-toolbar-row{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-top:9px}.history-select label{margin:0 0 5px}.button-group{display:grid;grid-template-columns:1fr 1fr;gap:7px}.button-group input{position:absolute;opacity:0;width:1px;height:1px}.button-group label{display:flex;align-items:center;justify-content:center;min-height:42px;margin:0;border:1px solid var(--border);border-radius:11px;background:var(--surface);font-size:12px;font-weight:750;text-align:center}.button-group input:checked+label{background:var(--primary-soft);border-color:var(--primary);color:var(--primary-strong)}.export-row{margin-top:9px}.export-row .button{margin:0}.button{display:block;width:100%;min-height:46px;border:0;border-radius:13px;background:var(--primary);color:#fff;font-size:14px;font-weight:800}.legend{margin-bottom:10px;color:var(--muted);font-size:11px;line-height:1.4}.trend-chart-wrap{padding:13px;margin:10px 0;border:1px solid var(--border);border-radius:16px;background:var(--surface-2)}.trend-chart-title{font-size:13px;font-weight:800;margin-bottom:6px}.trend-chart-wrap canvas{display:block;width:100%;height:150px}.chart-legend{margin:4px 0 0;color:var(--muted);font-size:10px}.history-cards{display:grid;gap:9px}.history-day-title{display:flex;align-items:center;gap:8px;margin:16px 0 2px;font-size:21px;font-weight:850;letter-spacing:-.4px}.day-chip{padding:4px 9px;border-radius:999px;background:var(--surface-3);color:var(--muted);font-size:11px;font-weight:750}.history-entry{position:relative;min-width:0;padding:15px 62px 15px 15px;border:1px solid var(--border);border-radius:18px;background:linear-gradient(145deg,var(--surface),var(--surface-2));box-shadow:var(--shadow);overflow:hidden}.history-entry-top{display:flex;align-items:center;gap:10px;min-width:0}.history-entry-main{min-width:0;flex:1}.history-entry-title{font-size:16px;font-weight:850;line-height:1.15}.history-entry-meta{margin-top:3px;color:var(--muted);font-size:12px;white-space:nowrap}.history-value{display:flex;align-items:baseline;gap:8px;margin:13px 0 7px;min-width:0}.history-value .number{font-size:38px;font-weight:900;letter-spacing:-1.3px}.history-value .unit{font-size:15px;font-weight:800}.status-badge{display:inline-flex;align-items:center;gap:4px;padding:5px 9px;border:1px solid;border-radius:999px;font-size:11px;font-weight:800;line-height:1.1;white-space:nowrap}.status-ok{color:var(--success);border-color:var(--success);background:var(--success-soft)}.status-low,.status-high{color:var(--danger);border-color:var(--danger);background:var(--danger-soft)}.comment-line{margin-top:9px;padding-top:8px;border-top:1px solid var(--border);color:var(--muted);font-size:12px;line-height:1.35;overflow-wrap:anywhere}.history-actions{position:absolute;top:15px;right:10px;display:flex;flex-direction:column;gap:7px}.icon-btn{width:40px;height:40px;border:1px solid var(--border);border-radius:12px;background:var(--surface-2);color:var(--text);font-size:18px;box-shadow:none}.icon-btn.delete{border-color:rgba(233,93,115,.6);color:var(--danger);background:var(--danger-soft)}.vitals-values{display:grid;grid-template-columns:minmax(0,1.25fr) 1px minmax(0,.75fr);gap:12px;align-items:center;margin-top:13px}.vitals-divider{width:1px;height:72px;background:var(--border)}.vital-label{color:var(--muted);font-size:12px;font-weight:750}.pressure-number{margin-top:3px;font-size:31px;font-weight:900;letter-spacing:-1px;white-space:nowrap}.pressure-unit,.pulse-unit{margin-top:2px;color:var(--muted);font-size:12px;font-weight:650}.vital-statuses{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:5px;margin-top:10px}.vital-status-item{min-width:0}.vital-status-item .status-badge{max-width:100%;overflow:hidden}.vital-caption{margin-top:3px;color:var(--muted);font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.edit-title{font-size:18px;font-weight:850;margin-bottom:8px}.message{margin-top:8px;font-size:13px;line-height:1.35}.ok{color:var(--success)}.error{color:var(--danger)}
-.switch-row{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:50px;margin:5px 0;font-size:14px;font-weight:700}.switch-row input{position:absolute;opacity:0;width:1px;height:1px}.switch{width:50px;height:30px;border-radius:15px;background:var(--surface-3);border:1px solid var(--border);position:relative;flex:0 0 auto}.switch:after{content:'';position:absolute;top:2px;left:2px;width:24px;height:24px;border-radius:50%;background:#fff;box-shadow:0 2px 5px rgba(0,0,0,.2);transition:left .18s}.switch-row input:checked+.switch{background:var(--primary);border-color:var(--primary)}.switch-row input:checked+.switch:after{left:22px}.settings-section{margin-top:16px;padding-top:15px;border-top:1px solid var(--border)}.settings-title{font-size:15px;font-weight:850;margin-bottom:7px}.muted{color:var(--muted);font-size:13px;line-height:1.45}.about-note{font-size:13px;line-height:1.5}.about-note h3{font-size:15px;margin:16px 0 5px}.about-note p,.about-note li{margin:6px 0}.about-note ul,.about-note ol{padding-left:20px}.range-row{display:grid;grid-template-columns:minmax(0,1fr) 70px 70px;gap:7px;align-items:center;margin:7px 0}.range-row span{font-size:12px}.range-row input{min-height:40px;padding:5px 6px;font-size:13px}.table-wrap{overflow:auto}.table-wrap table{width:100%;border-collapse:collapse;font-size:12px}.table-wrap th,.table-wrap td{border:1px solid var(--border);padding:7px;text-align:left}.history-table{display:none}
-.tab-bar{position:fixed;left:0;right:0;bottom:0;z-index:50;display:flex;gap:8px;padding:8px 12px calc(8px + env(safe-area-inset-bottom));background:var(--surface);border-top:1px solid var(--border);box-shadow:0 -8px 25px rgba(0,0,0,.12);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px)}.tab-btn{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;min-height:56px;border:1px solid transparent;border-radius:17px;background:transparent;color:var(--muted);font-size:12px;font-weight:800}.tab-btn .tab-icon{font-size:21px;line-height:1}.tab-btn.active{background:var(--primary-soft);border-color:var(--primary);color:var(--primary-strong)}
-#toast{position:fixed;left:12px;right:12px;z-index:200;top:calc(env(safe-area-inset-top) + 9px);display:flex;justify-content:center;pointer-events:none}#toast .toast-bubble{max-width:94%;padding:10px 14px;border-radius:13px;font-size:13px;font-weight:800;color:#fff;text-align:center;opacity:0;transform:translateY(-10px);transition:.2s}.toast-bubble.show{opacity:1!important;transform:translateY(0)!important}.toast-bubble.ok{background:var(--success)}.toast-bubble.error{background:var(--danger)}
-#pdf-overlay{position:fixed;inset:0;z-index:100;background:#525659;display:flex;flex-direction:column;padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)}.pdf-toolbar{display:flex;align-items:center;gap:7px;background:#fff;padding:8px 10px}.pdf-title{flex:1;min-width:0;font-weight:700;font-size:16px}.pdf-btn{width:auto;min-height:42px;line-height:42px;margin:0;padding:0 10px;font-size:18px;border-radius:10px;background:#f0f2f5;color:#17202b}.pdf-pages{flex:1}.pdf-status{color:#fff;text-align:center;padding:24px;font-size:16px}#zoom-label{min-width:48px;text-align:center;font-weight:700;font-size:14px;color:#333}#pdf-pages{flex:1;overflow:auto;-webkit-overflow-scrolling:touch;padding:10px}#pdf-pages canvas{display:block;margin:0 auto 10px;background:#fff;border-radius:3px;box-shadow:0 1px 4px rgba(0,0,0,.4)}
-@media(min-width:700px){main{padding-left:20px;padding-right:20px}.quick-list{grid-template-columns:repeat(3,1fr)}.quick-card{min-height:100px;display:grid;grid-template-columns:auto 1fr auto;align-content:center}.history-cards{grid-template-columns:1fr 1fr}.history-day-title{grid-column:1/-1}}
-@media(max-width:430px){.history-toolbar-row{grid-template-columns:1fr}.date-grid{grid-template-columns:1fr 1fr}.preset-row{grid-template-columns:repeat(4,1fr)}.vitals-values{gap:8px}.pressure-number{font-size:27px}.vital-statuses{gap:4px}.status-badge{font-size:10px;padding:5px 6px}.range-row{grid-template-columns:minmax(0,1fr) 62px 62px}.day-summary{grid-template-columns:repeat(4,1fr)}}
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="csrf-token" content="{{ csrf_token }}">
+  <script>
+    (function() {
+      // Определяем тему как можно раньше, до отрисовки страницы, чтобы
+      // не было мигания светлой темой перед переключением на тёмную.
+      try {
+        var t = localStorage.getItem('medical_diary_theme');
+        var dark = t ? (t === 'dark') : (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+        if (dark) { document.documentElement.classList.add('theme-dark'); }
+      } catch (e) {}
+    })();
+  </script>
+  <title>Медицинский дневник</title>
+  <link rel="apple-touch-icon" sizes="57x57" href="/apple-icon-57x57.png">
+  <link rel="apple-touch-icon" sizes="60x60" href="/apple-icon-60x60.png">
+  <link rel="apple-touch-icon" sizes="72x72" href="/apple-icon-72x72.png">
+  <link rel="apple-touch-icon" sizes="76x76" href="/apple-icon-76x76.png">
+  <link rel="apple-touch-icon" sizes="114x114" href="/apple-icon-114x114.png">
+  <link rel="apple-touch-icon" sizes="120x120" href="/apple-icon-120x120.png">
+  <link rel="apple-touch-icon" sizes="144x144" href="/apple-icon-144x144.png">
+  <link rel="apple-touch-icon" sizes="152x152" href="/apple-icon-152x152.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="/apple-icon-180x180.png">
+  <link rel="icon" type="image/png" sizes="192x192"  href="/android-icon-192x192.png">
+  <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
+  <link rel="icon" type="image/png" sizes="96x96" href="/favicon-96x96.png">
+  <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png">
+  <link rel="manifest" href="/manifest.json">
+  <meta name="msapplication-TileColor" content="#ffffff">
+  <meta name="msapplication-TileImage" content="/ms-icon-144x144.png">
+  <meta name="theme-color" content="#ffffff">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    html { overflow-x: hidden; }
+    body {
+      margin: 0;
+      background: #f2f2f7;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      -webkit-text-size-adjust: 100%;
+      overflow-x: hidden;
+      max-width: 100vw;
+      padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+      overscroll-behavior-x: none;
+    }
+    header {
+      position: sticky; top: 0; z-index: 10;
+      background: #fff; border-bottom: 1px solid #ddd;
+      padding: 10px 14px;
+      display: flex; justify-content: space-between; align-items: center; gap: 8px;
+    }
+    header .title { font-size: 20px; font-weight: 700; flex: 0 0 auto; }
+    header .user {
+      color: #666; font-size: 15px; font-weight: 600; flex: 1 1 auto; min-width: 0;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: center;
+    }
+    header button {
+      flex: 0 0 auto; width: auto; min-height: 44px;
+      padding: 0 14px; font-size: 16px; margin-top: 0; line-height: 44px;
+    }
+    main { padding: 14px; padding-bottom: 110px; max-width: 760px; margin: 0 auto; width: 100%; }
+    .card { background: #fff; border-radius: 18px; padding: 14px; margin-bottom: 14px; overflow: hidden; }
+    summary { font-size: 21px; font-weight: 600; cursor: pointer; padding: 4px 0; }
+    label { display: block; margin: 12px 0 4px; font-size: 16px; color: #333; }
+    input, select, textarea {
+      display: block; width: 100%; max-width: 100%; min-height: 48px;
+      border-radius: 14px; border: 1px solid #ccc; font-size: 20px;
+      padding: 8px 10px; background: #fff;
+    }
+    textarea { min-height: 70px; }
+    input[type="date"], input[type="datetime-local"] {
+      -webkit-appearance: none;
+      appearance: none;
+      min-width: 0;
+      width: 100%;
+      max-width: 100%;
+      font-size: 17px;
+      padding: 10px 8px;
+      white-space: nowrap;
+      overflow: hidden;
+    }
+    button, .button {
+      display: block; width: 100%; max-width: 100%; min-height: 52px;
+      border: 1px solid rgba(255,255,255,.35); border-radius: 22px;
+      background: linear-gradient(180deg, rgba(83,138,192,.65), rgba(58,110,165,.55));
+      -webkit-backdrop-filter: blur(18px) saturate(180%);
+      backdrop-filter: blur(18px) saturate(180%);
+      box-shadow:
+        inset 0 1px 1px rgba(255,255,255,.5),
+        inset 0 -1px 3px rgba(0,0,0,.12),
+        0 4px 14px rgba(58,110,165,.28);
+      color: #fff;
+      font-size: 18px; font-weight: 600; text-align: center; text-decoration: none;
+      line-height: 52px; margin-top: 14px; cursor: pointer;
+      transition: transform .12s ease, box-shadow .12s ease, opacity .12s ease;
+    }
+    button:active, .button:active {
+      transform: scale(.97);
+      box-shadow: inset 0 1px 4px rgba(0,0,0,.22), inset 0 -1px 1px rgba(255,255,255,.2);
+    }
+    button:disabled, .button:disabled { opacity: .5; transform: none; cursor: default; }
+    button.danger {
+      background: linear-gradient(180deg, rgba(212,84,68,.65), rgba(192,57,43,.55));
+      min-height: 44px; line-height: 44px; font-size: 16px; margin-top: 0;
+    }
+    button.secondary {
+      background: linear-gradient(180deg, rgba(158,158,163,.55), rgba(142,142,147,.5));
+    }
+    button.edit-btn { width: auto; min-height: 40px; line-height: 40px; font-size: 16px; margin-top: 0; padding: 0 12px; border-radius: 20px; }
+    button.del-btn { width: auto; min-height: 40px; line-height: 40px; font-size: 16px; margin-top: 0; padding: 0 10px; margin-left: 6px; border-radius: 20px; }
+    .cell-actions { display: flex; gap: 6px; }
+    .cell-actions button { margin-left: 0; }
+    [hidden] { display: none !important; }
+    #pdf-overlay {
+      position: fixed; inset: 0; z-index: 100;
+      background: #525659;
+      display: flex; flex-direction: column;
+      padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+    }
+    .pdf-toolbar { display: flex; align-items: center; gap: 10px; background: #fff; padding: 10px 12px; }
+    .pdf-title { flex: 1; min-width: 0; font-weight: 700; font-size: 17px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .pdf-btn { width: auto; min-height: 44px; line-height: 44px; margin: 0; padding: 0 14px; font-size: 20px; border-radius: 18px; }
+    #zoom-label { min-width: 52px; text-align: center; font-weight: 700; font-size: 15px; color: #333; }
+    #pdf-pages { flex: 1; overflow: auto; -webkit-overflow-scrolling: touch; padding: 10px; }
+    #pdf-pages canvas { display: block; margin: 0 auto 10px; background: #fff; border-radius: 4px; box-shadow: 0 1px 4px rgba(0,0,0,.4); }
+    .pdf-status { color: #fff; text-align: center; padding: 24px; font-size: 16px; }
+    .edit-title { font-size: 21px; font-weight: 600; padding: 4px 0; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .row > div { min-width: 0; }
+    .message { margin-top: 10px; font-size: 16px; }
+    .ok { color: #1a7f37; }
+    .error { color: #d70015; }
+    .table-wrap { overflow-x: auto; max-width: 100%; -webkit-overflow-scrolling: touch; }
+    table { width: 100%; border-collapse: collapse; font-size: 14px; margin-top: 12px; }
+    th, td { border: 1px solid #ddd; padding: 6px; text-align: left; vertical-align: top; word-break: break-word; }
+    .muted { color: #666; font-size: 14px; }
+    .button-group { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 6px; }
+    .button-group input { position: absolute; opacity: 0; pointer-events: none; width: 1px; height: 1px; }
+    .button-group label {
+      display: flex; align-items: center; justify-content: center; gap: 8px;
+      min-height: 60px; margin: 0; padding: 8px;
+      border: 2px solid #d1d1d6; border-radius: 16px; background: #fff;
+      font-size: 18px; font-weight: 600; color: #333; cursor: pointer;
+      -webkit-tap-highlight-color: transparent; text-align: center; line-height: 1.15;
+    }
+    .button-group .emoji { font-size: 22px; line-height: 1; }
+    .button-group input:checked + label { background: #007aff; border-color: #007aff; color: #fff; }
+    .button-group.cols3 { grid-template-columns: 1fr 1fr 1fr; }
+    .button-group.cols3 label { font-size: 15px; min-height: 52px; }
+    .st-low, .st-ok, .st-high { padding: 2px 6px; border-radius: 8px; font-weight: 700; }
+    .st-low { background: #fff3c4; }
+    .st-ok { background: #d9f2d9; }
+    .st-high { background: #fbd9d9; }
+    .legend { margin-top: 10px; font-size: 13px; color: #666; line-height: 1.6; }
+    .legend .dot { display: inline-block; width: 12px; height: 12px; border-radius: 4px; vertical-align: -1px; }
+    .date-btn {
+      position: relative; display: flex; align-items: center; gap: 8px;
+      min-height: 52px; margin: 0; padding: 8px 12px;
+      border: 2px solid #d1d1d6; border-radius: 16px; background: #fff;
+      font-size: 18px; font-weight: 600; color: #333; cursor: pointer;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .date-btn .emoji { font-size: 22px; line-height: 1; }
+    .date-btn .date-val { color: #007aff; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .date-btn input {
+      position: absolute; inset: 0; width: 100%; height: 100%;
+      opacity: 0; margin: 0; padding: 0; border: 0; min-height: 0; cursor: pointer;
+    }
+  
+.about-note { font-size: 15px; line-height: 1.45; color: #1c1c1e; }
+.about-note h3 { margin: 16px 0 6px; font-size: 17px; }
+.about-note p, .about-note li { margin: 6px 0; }
+.about-note ul, .about-note ol { margin-left: 18px; padding-left: 6px; }
+.recommendation { margin-top: 4px; font-size: 12px; line-height: 1.35; color: #666; }
+.assess-cell { min-width: 150px; }
+.settings-section { margin-top: 14px; }
+.settings-title { font-size: 17px; font-weight: 600; margin: 8px 0; }
+.switch-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 48px; margin: 6px 0; font-size: 17px; }
+.switch-row input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+.switch { width: 51px; height: 31px; border-radius: 16px; background: #e9e9ea; position: relative; transition: background .2s; flex: 0 0 auto; }
+.switch::after { content: ''; position: absolute; top: 2px; left: 2px; width: 27px; height: 27px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.3); transition: left .2s; }
+.switch-row input:checked + .switch { background: #34c759; }
+.switch-row input:checked + .switch::after { left: 22px; }
+
+.field-hint { margin: 2px 0 0; font-size: 13px; color: #8e8e93; }
+.last-entry-status { margin: 6px 0 0; font-size: 13px; color: #6b6b70; }
+.quick-repeat {
+  background: rgba(58,110,165,.12); color: #3a6ea5; border: 1px solid rgba(58,110,165,.18);
+  -webkit-backdrop-filter: blur(14px) saturate(160%);
+  backdrop-filter: blur(14px) saturate(160%);
+  box-shadow: inset 0 1px 1px rgba(255,255,255,.6);
+}
+.quick-repeat:active { transform: scale(.97); }
+
+#toast {
+  position: fixed; left: 12px; right: 12px; z-index: 200;
+  top: calc(env(safe-area-inset-top) + 10px);
+  display: flex; justify-content: center; pointer-events: none;
+}
+#toast .toast-bubble {
+  max-width: 92%; padding: 10px 18px; border-radius: 14px;
+  font-size: 15px; font-weight: 600; color: #fff; text-align: center;
+  box-shadow: 0 4px 14px rgba(0,0,0,.25);
+  opacity: 0; transform: translateY(-12px); transition: opacity .2s, transform .2s;
+}
+#toast .toast-bubble.show { opacity: 1; transform: translateY(0); }
+#toast .toast-bubble.ok { background: #1a7f37; }
+#toast .toast-bubble.error { background: #d70015; }
+
+.day-row td { background: #f2f2f7; font-weight: 700; color: #444; font-size: 13px; padding: 8px 6px; }
+.history-empty td { text-align: center; color: #8e8e93; padding: 24px 6px; }
+
+.trend-chart-wrap { margin: 10px 0 4px; }
+.trend-chart-wrap canvas { width: 100%; height: 150px; display: block; }
+.trend-chart-title { font-size: 14px; font-weight: 700; color: #444; margin: 12px 0 2px; }
+.chart-legend { font-size: 11px; color: #8e8e93; margin: 2px 0 0; line-height: 1.4; }
+.preset-row { display: flex; gap: 8px; margin: 4px 0 10px; }
+.preset-btn {
+  flex: 1 1 0; width: auto; min-height: 34px; line-height: 34px; margin-top: 0;
+  padding: 0 6px; font-size: 13px; font-weight: 500; border-radius: 17px;
+  background: rgba(58,110,165,.1); color: #3a6ea5; border: 1px solid rgba(58,110,165,.16);
+  -webkit-backdrop-filter: blur(14px) saturate(160%);
+  backdrop-filter: blur(14px) saturate(160%);
+  box-shadow: inset 0 1px 1px rgba(255,255,255,.6);
+}
+.preset-btn:active { transform: scale(.95); }
+
+.range-row { display: grid; grid-template-columns: 1fr 70px 70px; gap: 8px; align-items: center; margin: 8px 0; }
+.range-row span { font-size: 15px; color: #333; }
+.range-row input { min-height: 40px; font-size: 15px; padding: 4px 6px; }
+
+.tab-bar {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 50;
+  display: flex; gap: 4px;
+  background: rgba(255,255,255,.65);
+  -webkit-backdrop-filter: blur(24px) saturate(180%);
+  backdrop-filter: blur(24px) saturate(180%);
+  border-top: 1px solid rgba(255,255,255,.5);
+  box-shadow: 0 -1px 12px rgba(0,0,0,.06);
+  padding: 4px env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+}
+.tab-btn {
+  flex: 1 1 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 2px; margin: 4px 3px; padding: 6px 2px; background: none; border: 1px solid transparent;
+  border-radius: 18px; color: #8e8e93;
+  font-size: 11px; min-height: 48px; line-height: 1.2; cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition: background .15s ease, transform .12s ease;
+}
+.tab-btn:active { transform: scale(.94); }
+.tab-btn .tab-icon { font-size: 22px; line-height: 1; }
+.tab-btn.active {
+  color: #3a6ea5;
+  background: rgba(58,110,165,.12);
+  border: 1px solid rgba(58,110,165,.16);
+  box-shadow: inset 0 1px 1px rgba(255,255,255,.6);
+}
+
+html.theme-dark body { background: #000; }
+html.theme-dark header { background: #1c1c1e; border-bottom-color: #2c2c2e; }
+html.theme-dark header .user { color: #a9a9ae; }
+html.theme-dark .card { background: #1c1c1e; }
+html.theme-dark summary, html.theme-dark .settings-title, html.theme-dark .edit-title { color: #f2f2f7; }
+html.theme-dark label { color: #d1d1d6; }
+html.theme-dark input, html.theme-dark select, html.theme-dark textarea { background: #2c2c2e; border-color: #3a3a3c; color: #f2f2f7; }
+html.theme-dark button, html.theme-dark .button {
+  background: linear-gradient(180deg, rgba(255,255,255,.16), rgba(255,255,255,.06));
+  color: #f2f2f7; border: 1px solid rgba(255,255,255,.4);
+  box-shadow: inset 0 1px 1px rgba(255,255,255,.25), inset 0 -1px 3px rgba(0,0,0,.4), 0 4px 14px rgba(0,0,0,.35);
+}
+html.theme-dark button.secondary {
+  background: linear-gradient(180deg, rgba(255,255,255,.12), rgba(255,255,255,.04));
+  color: #f2f2f7; border: 1px solid rgba(255,255,255,.4);
+}
+html.theme-dark button.danger {
+  background: linear-gradient(180deg, rgba(255,105,97,.22), rgba(255,105,97,.1));
+  color: #ff6961; border: 1px solid rgba(255,105,97,.55);
+}
+html.theme-dark .button-group label, html.theme-dark .date-btn { background: #2c2c2e; border-color: #3a3a3c; color: #f2f2f7; }
+html.theme-dark .button-group input:checked + label { background: rgba(255,255,255,.14); border-color: rgba(255,255,255,.5); color: #f2f2f7; }
+html.theme-dark .muted, html.theme-dark .field-hint, html.theme-dark .recommendation, html.theme-dark .last-entry-status { color: #98989d; }
+html.theme-dark th, html.theme-dark td { border-color: #3a3a3c; color: #f2f2f7; }
+html.theme-dark .day-row td { background: #2c2c2e; color: #c7c7cc; }
+html.theme-dark .about-note { color: #e5e5ea; }
+html.theme-dark .quick-repeat { background: rgba(100,181,255,.14); color: #64b5ff; border: 1px solid rgba(100,181,255,.5); }
+html.theme-dark .preset-btn { background: rgba(255,255,255,.1); color: #f2f2f7; border: 1px solid rgba(255,255,255,.35); }
+html.theme-dark .tab-bar { background: rgba(28,28,30,.72); border-top-color: rgba(255,255,255,.12); }
+html.theme-dark .tab-btn.active { color: #fff; background: rgba(255,255,255,.14); border-color: rgba(255,255,255,.2); }
+html.theme-dark .trend-chart-title { color: #c7c7cc; }
+html.theme-dark .chart-legend { color: #7a7a7e; }
+html.theme-dark button.edit-btn {
+  background: rgba(255,255,255,.12); color: #f2f2f7; border: 1px solid rgba(255,255,255,.3);
+}
+html.theme-dark button.del-btn {
+  background: rgba(255,105,97,.18); color: #ff6961; border: 1px solid rgba(255,105,97,.4);
+}
+
+button.edit-btn, button.del-btn {
+  width: 36px; height: 36px; min-height: 36px; line-height: 36px;
+  padding: 0; border-radius: 50%; font-size: 15px; margin-top: 0;
+  background: rgba(60,60,67,.08); color: #48484a; border: 1px solid rgba(0,0,0,.06);
+  -webkit-backdrop-filter: blur(12px) saturate(160%);
+  backdrop-filter: blur(12px) saturate(160%);
+  box-shadow: inset 0 1px 1px rgba(255,255,255,.6), inset 0 -1px 1px rgba(0,0,0,.04);
+  transition: transform .12s ease;
+}
+button.del-btn {
+  margin-left: 6px; background: rgba(192,57,43,.12); color: #c0392b; border: 1px solid rgba(192,57,43,.15);
+}
+button.edit-btn:active, button.del-btn:active { transform: scale(.9); }
+
 </style>
 </head>
 <body>
-<div id="toast"><div class="toast-bubble" id="toast-bubble"></div></div>
-<div class="app-shell">
-<header class="topbar">
-  <div class="brand"><div class="eyebrow">{{ display_name }}</div><div class="brand-title">Медицинский дневник</div></div>
-  <button type="button" class="header-action" onclick="showPage('settings')" aria-label="Настройки">⚙️</button>
-</header>
-<main>
-<section id="page-input" class="tab-page">
-  <div class="page-intro"><h1>Добрый вечер</h1><p id="today-label">Сегодня</p></div>
-  <div class="section-label"><strong>Быстрая запись</strong><span>Нажмите, чтобы добавить</span></div>
-  <div class="quick-list">
-    <button type="button" class="quick-card" id="card-glucose" onclick="openEntry('glucose')"><span class="quick-icon glucose">💧</span><span class="quick-copy"><span class="quick-title">Глюкоза</span><span class="quick-sub">Добавить измерение</span></span><span class="chevron">›</span></button>
-    <button type="button" class="quick-card" id="card-vitals" onclick="openEntry('vitals')"><span class="quick-icon vitals">♥</span><span class="quick-copy"><span class="quick-title">Давление и пульс</span><span class="quick-sub">Добавить измерение</span></span><span class="chevron">›</span></button>
-    <button type="button" class="quick-card" id="card-food" onclick="openEntry('food')"><span class="quick-icon food">🍴</span><span class="quick-copy"><span class="quick-title">Питание</span><span class="quick-sub">Добавить запись</span></span><span class="chevron">›</span></button>
+  <div id="toast"><div class="toast-bubble" id="toast-bubble"></div></div>
+  <header>
+    <span class="title">Дневник</span>
+    <span class="user">{{ display_name }}</span>
+    <button type="button" onclick="logout()">Выход</button>
+  </header>
+
+  <main>
+    <div id="page-input" class="tab-page">
+    <div class="card" id="card-glucose">
+   <details>
+     <summary>🩸 Глюкоза</summary><form id="glucose-form">
+          <button type="button" class="quick-repeat" onclick="repeatLast('glucose', event)">↻ Повторить последнее</button>
+          <p class="last-entry-status" id="last-status-glucose"></p>
+
+          <label>Тип измерения</label>
+          <div class="button-group" role="radiogroup" aria-label="Тип измерения глюкозы">
+            <input type="radio" id="gt_fasting" name="glucose_type" value="fasting" checked>
+            <label for="gt_fasting"><span class="emoji">🌅</span><span>Натощак</span></label>
+            <input type="radio" id="gt_postmeal" name="glucose_type" value="post_meal">
+            <label for="gt_postmeal"><span class="emoji">🍽️</span><span>После еды</span></label>
+          </div>
+
+          <label>Значение, ммоль/л</label>
+          <input name="value" class="decimal-input" type="text" inputmode="decimal" pattern="[0-9]+([.,][0-9]+)?" required>
+          <p class="field-hint" id="hint-glucose"></p>
+
+          <label>Дата и время</label>
+          <input name="measured_at" type="datetime-local" class="dt">
+
+          <label>Комментарий</label>
+          <textarea name="comment" maxlength="1000"></textarea>
+
+          <button type="submit">Сохранить</button>
+          <div class="message" id="glucose-msg"></div>
+        </form>
+      </details>
+    </div>
+
+    <div class="card" id="card-vitals">
+   <details>
+
+     <summary>💓 Давление и пульс</summary><form id="vitals-form">
+          <button type="button" class="quick-repeat" onclick="repeatLast('vitals', event)">↻ Повторить последнее</button>
+          <p class="last-entry-status" id="last-status-vitals"></p>
+
+          <div class="row">
+            <div>
+              <label>Систолическое</label>
+              <input name="systolic" type="number" min="30" max="400" inputmode="numeric" required>
+              <p class="field-hint" id="hint-systolic"></p>
+            </div>
+            <div>
+              <label>Диастолическое</label>
+              <input name="diastolic" type="number" min="10" max="300" inputmode="numeric" required>
+              <p class="field-hint" id="hint-diastolic"></p>
+            </div>
+          </div>
+
+          <label>Пульс</label>
+          <input name="pulse" type="number" min="20" max="300" inputmode="numeric">
+          <p class="field-hint" id="hint-pulse"></p>
+
+          <label>Дата и время</label>
+          <input name="measured_at" type="datetime-local" class="dt">
+
+          <label>Комментарий</label>
+          <textarea name="comment" maxlength="1000"></textarea>
+
+          <button type="submit">Сохранить</button>
+          <div class="message" id="vitals-msg"></div>
+        </form>
+      </details>
+    </div>
+
+    <div class="card" id="card-food">
+   <details>
+     <summary>🥗 Питание</summary><form id="food-form">
+          <button type="button" class="quick-repeat" onclick="repeatLast('food', event)">↻ Повторить последнее</button>
+          <p class="last-entry-status" id="last-status-food"></p>
+
+          <label>Продукт</label>
+          <input name="food_name" maxlength="150" required>
+
+          <div class="row">
+            <div>
+              <label>Количество</label>
+              <input name="amount_value" class="decimal-input" type="text" inputmode="decimal" pattern="[0-9]+([.,][0-9]+)?" required>
+            </div>
+            <div>
+              <label>Единица</label>
+              <select name="amount_unit">
+                <option value="г">г</option>
+                <option value="мл">мл</option>
+                <option value="шт">шт</option>
+                <option value="порция">порция</option>
+              </select>
+            </div>
+          </div>
+
+          <label>Дата и время</label>
+          <input name="consumed_at" type="datetime-local" class="dt">
+
+          <label>Комментарий</label>
+          <textarea name="comment" maxlength="1000"></textarea>
+
+          <button type="submit">Сохранить</button>
+          <div class="message" id="food-msg"></div>
+        </form>
+      </details>
+    </div>
+    </div>
+
+    <div id="page-history" class="tab-page" hidden>
+    <div class="card" id="edit-card" hidden>
+      <div class="edit-title" id="edit-title">✏️ Редактирование</div>
+
+      <div id="edit-glucose" hidden>
+        <label>Тип измерения</label>
+        <select id="edit_glucose_type">
+          <option value="fasting">🌅 Натощак</option>
+          <option value="post_meal">🍽️ После еды</option>
+        </select>
+        <label>Значение, ммоль/л</label>
+        <input id="edit_glucose_value" class="decimal-input" type="text" inputmode="decimal" pattern="[0-9]+([.,][0-9]+)?">
+      </div>
+
+      <div id="edit-vitals" hidden>
+        <div class="row">
+          <div>
+            <label>Систолическое</label>
+            <input id="edit_systolic" type="number" min="30" max="400" inputmode="numeric">
+          </div>
+          <div>
+            <label>Диастолическое</label>
+            <input id="edit_diastolic" type="number" min="10" max="300" inputmode="numeric">
+          </div>
+        </div>
+        <label>Пульс</label>
+        <input id="edit_pulse" type="number" min="20" max="300" inputmode="numeric">
+      </div>
+
+      <div id="edit-food" hidden>
+        <label>Продукт</label>
+        <input id="edit_food_name" maxlength="150">
+        <div class="row">
+          <div>
+            <label>Количество</label>
+            <input id="edit_amount_value" class="decimal-input" type="text" inputmode="decimal" pattern="[0-9]+([.,][0-9]+)?">
+          </div>
+          <div>
+            <label>Единица</label>
+            <select id="edit_amount_unit">
+              <option value="г">г</option>
+              <option value="мл">мл</option>
+              <option value="шт">шт</option>
+              <option value="порция">порция</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
+      <label>Дата и время</label>
+      <input id="edit_measured_at" type="datetime-local">
+
+      <label>Комментарий</label>
+      <textarea id="edit_comment" maxlength="1000"></textarea>
+
+      <button type="button" onclick="saveEdit()">Сохранить изменения</button>
+      <button type="button" class="secondary" onclick="closeEdit()">Отмена</button>
+      <div class="message" id="edit-msg"></div>
+    </div>
+
+    <div class="card">
+      <details>
+        <summary>📋 История</summary>
+
+        <div class="row">
+          <div>
+            <span class="date-btn">
+              <span class="emoji">📅</span><span>с</span>
+              <span class="date-val" id="date_from_label"></span>
+              <input type="date" id="date_from" aria-label="Дата начала периода">
+            </span>
+          </div>
+          <div>
+            <span class="date-btn">
+              <span class="emoji">📅</span><span>по</span>
+              <span class="date-val" id="date_to_label"></span>
+              <input type="date" id="date_to" aria-label="Дата конца периода">
+            </span>
+          </div>
+        </div>
+
+        <div class="preset-row">
+          <button type="button" class="preset-btn" onclick="setDateRangePreset(7)">7 дней</button>
+          <button type="button" class="preset-btn" onclick="setDateRangePreset(30)">30 дней</button>
+          <button type="button" class="preset-btn" onclick="setDateRangePreset(90)">3 месяца</button>
+        </div>
+
+        <label for="history_type">Показывать</label>
+        <select id="history_type" name="history_type">
+          <option value="all">📋 Все записи</option>
+          <option value="glucose">🩸 Только глюкоза</option>
+          <option value="vitals">💓 Только давление и пульс</option>
+          <option value="food">🥗 Только питание</option>
+        </select>
+
+        <label>Сортировка</label>
+        <div class="button-group" role="radiogroup" aria-label="Сортировка">
+          <input type="radio" id="hs_date" name="history_sort" value="date" checked>
+          <label for="hs_date"><span class="emoji">📅</span><span>По дате</span></label>
+          <input type="radio" id="hs_value" name="history_sort" value="value">
+          <label for="hs_value"><span class="emoji">🔢</span><span>По значению</span></label>
+        </div>
+
+        <button type="button" id="export-btn" class="button" onclick="openPdfViewer()">📄 Выгрузить PDF</button>
+
+        <div class="legend">
+          <span class="dot" style="background:#fff3c4"></span> ▼ ниже нормы ·
+          <span class="dot" style="background:#d9f2d9"></span> норма ·
+          <span class="dot" style="background:#fbd9d9"></span> ▲ выше нормы.<br>
+          Подсветка опирается на общестатистические (или заданные вами в настройках) нормы и не является диагнозом.
+        </div>
+
+        <div class="trend-chart-wrap" id="trend-glucose-wrap" hidden>
+          <div class="trend-chart-title">🩸 Глюкоза, ммоль/л</div>
+          <canvas id="trend-glucose"></canvas>
+          <p class="chart-legend">● натощак &nbsp;·&nbsp; ■ после еды &nbsp;·&nbsp; зелёным — целевой диапазон &nbsp;·&nbsp; синий — в норме, красный — вне диапазона</p>
+        </div>
+        <div class="trend-chart-wrap" id="trend-vitals-wrap" hidden>
+          <div class="trend-chart-title">💓 Давление, мм рт. ст.</div>
+          <canvas id="trend-vitals"></canvas>
+          <p class="chart-legend">● систолическое &nbsp;·&nbsp; ■ диастолическое &nbsp;·&nbsp; зелёным — целевой диапазон &nbsp;·&nbsp; синий — в норме, красный — вне диапазона</p>
+        </div>
+
+        <div class="message" id="history-msg"></div>
+
+        <div class="table-wrap">
+          <table id="history-table">
+            <thead>
+              <tr>
+                <th>Дата</th>
+                <th>Тип</th>
+                <th>Значение</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </details>
+    </div>
+    </div>
+
+    <div id="page-settings" class="tab-page" hidden>
+<div class="card">
+  <details>
+    <summary>ℹ️ О программе</summary>
+    <div class="about-note">
+      <p><strong>Медицинский дневник</strong> — сервис для хранения и наблюдения показателей: глюкоза, давление, пульс и питание.</p>
+      <p><strong>Важно:</strong> приложение не ставит диагнозы и не назначает лечение. Автоматические оценки — справочные.</p>
+      <h3>Как пользоваться</h3>
+      <ol>
+        <li>Войдите в приложение.</li>
+        <li>Добавьте измерение: глюкоза, давление/пульс или питание.</li>
+        <li>Проверьте записи в разделе «История».</li>
+        <li>При необходимости редактируйте или удалите запись.</li>
+        <li>Выгрузите PDF для врача.</li>
+      </ol>
+      <h3>Как вводить данные</h3>
+      <ul>
+        <li>Глюкоза: выберите тип — натощак или после еды, укажите значение в ммоль/л.</li>
+        <li>Давление: укажите систолическое и диастолическое значение, пульс — при наличии.</li>
+        <li>Питание: продукт, количество и единицу измерения. Неточное количество лучше указать приблизительно и написать комментарий.</li>
+        <li>В комментарии полезно указывать самочувствие, еду, нагрузку и другие факторы.</li>
+      </ul>
+      <h3>Установка как веб-приложение</h3>
+      <ul>
+        <li>iPhone/iPad, Safari: «Поделиться» → «На экран „Домой»».</li>
+        <li>Android, Chrome: меню → «Добавить на главный экран» или «Установить приложение».</li>
+        <li>Компьютер, Chrome/Edge: значок установки в адресной строке или меню → «Установить».</li>
+      </ul>
+      <h3>Рекомендации по измерению</h3>
+      <ul>
+        <li>Глюкоза: чистые сухие руки; при неожиданном значении повторите измерение.</li>
+        <li>Давление: сидя, после 5 минут покоя, манжета на уровне сердца, не разговаривать.</li>
+        <li>Пульс: измеряйте в покое; при необычных значениях повторите позже.</li>
+        <li>Регулярность важнее идеальной точности.</li>
+      </ul>
+      <h3>Безопасность</h3>
+      <ul>
+        <li>Не сообщайте пароль другим людям.</li>
+        <li>На чужом устройстве выходите из приложения.</li>
+        <li>Регулярно сохраняйте PDF и резервные копии базы данных.</li>
+      </ul>
+    </div>
+  </details>
+</div>
+
+ <div class="card">
+      <details>
+        <summary>⚙️ Настройки</summary>
+        <div class="settings-section">
+          <div class="settings-title">Оформление</div>
+          <label class="switch-row"><span>🌙 Тёмная тема</span><input type="checkbox" id="theme-toggle" onchange="onThemeToggleChange(this)"><span class="switch"></span></label>
+        </div>
+        <div class="settings-section">
+          <div class="settings-title">Блоки на главной странице</div>
+          <label class="switch-row"><span>🩸 Глюкоза</span><input type="checkbox" id="set-glucose" checked><span class="switch"></span></label>
+          <label class="switch-row"><span>💓 Давление и пульс</span><input type="checkbox" id="set-vitals" checked><span class="switch"></span></label>
+          <label class="switch-row"><span>🥗 Питание</span><input type="checkbox" id="set-food" checked><span class="switch"></span></label>
+          <div class="message" id="settings-msg"></div>
+        </div>
+        <div class="settings-section">
+          <div class="settings-title" id="wa-summary">🔐 Биометрия</div>
+          <p class="muted" id="wa-hint">Быстрый вход по биометрии этого устройства, без пароля.</p>
+          <label class="switch-row"><span id="wa-toggle-label">Вход по биометрии</span><input type="checkbox" id="wa-toggle" onchange="onWaToggleChange(this)"><span class="switch"></span></label>
+          <p class="muted" id="wa-availability"></p>
+          <div class="message" id="wa-msg"></div>
+        </div>
+        <div class="settings-section">
+          <div class="settings-title">Персональные диапазоны нормы</div>
+          <p class="muted">Используются только для справочной подсветки значений — не для диагностики. Если врач указал вам другие целевые значения, впишите их здесь. Значения сохраняются автоматически.</p>
+          <label class="switch-row"><span>Использовать значения по умолчанию</span><input type="checkbox" id="ranges-default-toggle" onchange="onRangesDefaultToggleChange(this)"><span class="switch"></span></label>
+          <div id="range-inputs">
+            <div class="range-row"><span>Глюкоза натощак, ммоль/л</span><input class="decimal-input" type="text" inputmode="decimal" pattern="[0-9]+([.,][0-9]+)?" id="range-glucose_fasting-low" oninput="scheduleSaveRanges()"><input class="decimal-input" type="text" inputmode="decimal" pattern="[0-9]+([.,][0-9]+)?" id="range-glucose_fasting-high" oninput="scheduleSaveRanges()"></div>
+            <div class="range-row"><span>Глюкоза после еды, ммоль/л</span><input class="decimal-input" type="text" inputmode="decimal" pattern="[0-9]+([.,][0-9]+)?" id="range-glucose_post-low" oninput="scheduleSaveRanges()"><input class="decimal-input" type="text" inputmode="decimal" pattern="[0-9]+([.,][0-9]+)?" id="range-glucose_post-high" oninput="scheduleSaveRanges()"></div>
+            <div class="range-row"><span>Систолическое, мм рт. ст.</span><input type="number" step="1" id="range-systolic-low" oninput="scheduleSaveRanges()"><input type="number" step="1" id="range-systolic-high" oninput="scheduleSaveRanges()"></div>
+            <div class="range-row"><span>Диастолическое, мм рт. ст.</span><input type="number" step="1" id="range-diastolic-low" oninput="scheduleSaveRanges()"><input type="number" step="1" id="range-diastolic-high" oninput="scheduleSaveRanges()"></div>
+            <div class="range-row"><span>Пульс, уд/мин</span><input type="number" step="1" id="range-pulse-low" oninput="scheduleSaveRanges()"><input type="number" step="1" id="range-pulse-high" oninput="scheduleSaveRanges()"></div>
+          </div>
+          <div class="message" id="ranges-msg"></div>
+        </div>
+      </details>
+    </div>
+
+    {% if is_admin %}
+    <div class="card">
+      <details>
+        <summary>👥 Пользователи</summary>
+
+        <form id="user-form">
+          <label>Логин</label>
+          <input name="username" maxlength="64" autocomplete="off" required>
+
+          <label>Отображаемое имя</label>
+          <input name="display_name" maxlength="100" required>
+
+          <label>Пароль</label>
+          <input name="password" type="password" minlength="8" autocomplete="new-password" required>
+
+          <button type="submit">Добавить пользователя</button>
+          <div class="message" id="user-msg"></div>
+        </form>
+
+        <form id="user-edit-form" hidden>
+          <div class="edit-title" id="user-edit-title">✏️ Редактирование пользователя</div>
+
+          <label>Логин</label>
+          <input name="username" maxlength="64" autocomplete="off" required>
+
+          <label>Отображаемое имя</label>
+          <input name="display_name" maxlength="100" required>
+
+          <label>Новый пароль (не менять — оставьте пустым)</label>
+          <input name="password" type="password" minlength="8" autocomplete="new-password">
+
+          <button type="submit">Сохранить</button>
+          <button type="button" class="secondary" onclick="cancelUserEdit()">Отмена</button>
+          <div class="message" id="user-edit-msg"></div>
+        </form>
+
+        <div class="table-wrap">
+          <table id="users-table">
+            <thead>
+              <tr>
+                <th>Имя</th>
+                <th>Логин</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </details>
+    </div>
+
+    <div class="card">
+      <details>
+        <summary>🗄️ Резервные копии БД</summary>
+        <p class="muted" id="backup-status">Загрузка статуса…</p>
+        <button type="button" onclick="runBackupNow()">Снять копию сейчас</button>
+        <div class="message" id="backup-msg"></div>
+        <div class="table-wrap">
+          <table id="backup-table">
+            <thead><tr><th>Файл</th><th>Создан</th><th>Размер</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </details>
+    </div>
+    {% endif %}
+    </div>
+  </main>
+
+  <nav class="tab-bar">
+    <button type="button" class="tab-btn" id="tab-btn-input" onclick="showPage('input')">
+      <span class="tab-icon">📝</span><span>Ввод</span>
+    </button>
+    <button type="button" class="tab-btn" id="tab-btn-history" onclick="showPage('history')">
+      <span class="tab-icon">📊</span><span>История</span>
+    </button>
+    <button type="button" class="tab-btn" id="tab-btn-settings" onclick="showPage('settings')">
+      <span class="tab-icon">⚙️</span><span>Ещё</span>
+    </button>
+  </nav>
+
+  <div id="pdf-overlay" hidden>
+    <div class="pdf-toolbar">
+      <button type="button" class="pdf-btn" onclick="zoomPdf(-1)" aria-label="Уменьшить">➖</button>
+      <span id="zoom-label">100%</span>
+      <button type="button" class="pdf-btn" onclick="zoomPdf(1)" aria-label="Увеличить">➕</button>
+      <span class="pdf-title">📄</span>
+      <button type="button" class="pdf-btn" onclick="sharePdf()" aria-label="Поделиться PDF">📤</button>
+      <button type="button" class="pdf-btn" onclick="closePdfViewer()" aria-label="Закрыть просмотр">❌</button>
+    </div>
+    <div id="pdf-pages"></div>
   </div>
-  <div class="section-label"><strong>Последние записи</strong><button type="button" class="link-btn" onclick="showPage('history')">Все →</button></div>
-  <div id="dashboard-recent" class="recent-list"><div class="muted">Загрузка…</div></div>
-  <div class="section-label"><strong>Сегодня</strong></div>
-  <div id="day-summary" class="day-summary"><div class="day-stat"><div class="num" id="sum-total">—</div><div class="label">записи</div></div><div class="day-stat"><div class="num" id="sum-glucose">—</div><div class="label">глюкоза</div></div><div class="day-stat"><div class="num" id="sum-vitals">—</div><div class="label">давление</div></div><div class="day-stat"><div class="num" id="sum-food">—</div><div class="label">питание</div></div></div>
-</section>
 
-<section id="page-history" class="tab-page" hidden>
-  <div class="history-head"><div><h1>История</h1><div class="history-count" id="history-count">Записей: —</div></div><button type="button" class="filter-toggle" onclick="document.getElementById('history-filter-card').hidden=!document.getElementById('history-filter-card').hidden">⚱ Фильтры</button></div>
-  <div class="card flat history-filters" id="history-filter-card">
-    <div class="filter-title">Период</div>
-    <div class="date-grid"><span class="date-btn">📅 <span>с</span><span class="date-val" id="date_from_label"></span><input type="date" id="date_from" aria-label="Дата начала периода"></span><span class="date-btn">📅 <span>по</span><span class="date-val" id="date_to_label"></span><input type="date" id="date_to" aria-label="Дата конца периода"></span></div>
-    <div class="preset-row"><button type="button" class="preset-btn" onclick="setDateRangePreset(7)">7 дней</button><button type="button" class="preset-btn" onclick="setDateRangePreset(30)">30 дней</button><button type="button" class="preset-btn" onclick="setDateRangePreset(90)">3 месяца</button><button type="button" class="preset-btn" onclick="setDateRangePreset(365)">Год</button></div>
-    <div class="history-toolbar-row"><div class="history-select"><label for="history_type">Тип записей</label><select id="history_type"><option value="all">📋 Все записи</option><option value="glucose">🩸 Только глюкоза</option><option value="vitals">♥ Только давление и пульс</option><option value="food">🍴 Только питание</option></select></div><div class="history-select"><label>Сортировка</label><div class="button-group"><input type="radio" id="hs_date" name="history_sort" value="date" checked><label for="hs_date">📅 По дате</label><input type="radio" id="hs_value" name="history_sort" value="value"><label for="hs_value">🔢 По значению</label></div></div></div>
-    <div class="export-row"><button type="button" class="button" id="export-btn" onclick="openPdfViewer()">📄 Выгрузить PDF</button></div>
-  </div>
-  <div class="card flat"><div class="legend">● Натощак · ■ После еды · зелёный — целевой диапазон · красный — вне диапазона. Подсветка справочная и не является диагнозом.</div><div class="trend-chart-wrap" id="trend-glucose-wrap" hidden><div class="trend-chart-title">🩸 Глюкоза, ммоль/л</div><canvas id="trend-glucose"></canvas><p class="chart-legend">● натощак · ■ после еды · зелёным — целевой диапазон</p></div><div class="trend-chart-wrap" id="trend-vitals-wrap" hidden><div class="trend-chart-title">♥ Давление, мм рт. ст.</div><canvas id="trend-vitals"></canvas><p class="chart-legend">● систолическое · ■ диастолическое · зелёным — целевой диапазон</p></div><div class="message" id="history-msg"></div><div id="history-cards" class="history-cards" aria-live="polite"></div><div class="table-wrap"><table id="history-table"><thead><tr><th>Дата</th><th>Тип</th><th>Значение</th><th></th></tr></thead><tbody></tbody></table></div></div>
-  <div class="card" id="edit-card" hidden><div class="edit-title" id="edit-title">✏️ Редактирование</div><div id="edit-glucose" hidden><label>Тип измерения</label><select id="edit_glucose_type"><option value="fasting">🌅 Натощак</option><option value="post_meal">🍽️ После еды</option></select><label>Значение, ммоль/л</label><input id="edit_glucose_value" class="decimal-input" type="text" inputmode="decimal"></div><div id="edit-vitals" hidden><div class="row"><div><label>Систолическое</label><input id="edit_systolic" type="number" min="30" max="400" inputmode="numeric"></div><div><label>Диастолическое</label><input id="edit_diastolic" type="number" min="10" max="300" inputmode="numeric"></div></div><label>Пульс</label><input id="edit_pulse" type="number" min="20" max="300" inputmode="numeric"></div><div id="edit-food" hidden><label>Продукт</label><input id="edit_food_name" maxlength="150"><div class="row"><div><label>Количество</label><input id="edit_amount_value" class="decimal-input" type="text" inputmode="decimal"></div><div><label>Единица</label><select id="edit_amount_unit"><option value="г">г</option><option value="мл">мл</option><option value="шт">шт</option><option value="порция">порция</option></select></div></div></div><label>Дата и время</label><input id="edit_measured_at" type="datetime-local"><label>Комментарий</label><textarea id="edit_comment" maxlength="1000"></textarea><button type="button" class="primary-action" onclick="saveEdit()">Сохранить изменения</button><button type="button" class="quick-repeat" onclick="closeEdit()">Отмена</button><div class="message" id="edit-msg"></div></div>
-</section>
-    <section id="page-settings" class="tab-page" hidden>
-      <div class="page-intro"><div><h1>Ещё</h1><p>Настройки, помощь и управление данными.</p></div></div>
-      <div class="card"><details><summary>ℹ️ О программе и помощь</summary><div class="about-note">
-        <p><strong>Медицинский дневник</strong> — сервис для хранения и наблюдения показателей: глюкоза, давление, пульс и питание.</p><p><strong>Важно:</strong> приложение не ставит диагнозы и не назначает лечение. Автоматические оценки — справочные.</p>
-        <h3>Как пользоваться</h3><ol><li>Войдите в приложение.</li><li>Добавьте измерение.</li><li>Проверьте записи в «Истории».</li><li>При необходимости редактируйте или удалите запись.</li><li>Выгрузите PDF для врача.</li></ol>
-        <h3>Как вводить данные</h3><ul><li>Глюкоза: выберите тип — натощак или после еды, укажите значение в ммоль/л.</li><li>Давление: укажите систолическое и диастолическое значение, пульс — при наличии.</li><li>Питание: продукт, количество и единицу измерения.</li><li>В комментарии полезно указывать самочувствие, еду, нагрузку и другие факторы.</li></ul>
-        <h3>Безопасность</h3><ul><li>Не сообщайте пароль другим людям.</li><li>На чужом устройстве выходите из приложения.</li><li>Регулярно сохраняйте PDF и резервные копии базы данных.</li></ul>
-      </div></details></div>
-      <div class="card"><details><summary>⚙️ Настройки</summary>
-        <div class="settings-section"><div class="settings-title">Оформление</div><label class="switch-row"><span>🌙 Тёмная тема</span><input type="checkbox" id="theme-toggle" onchange="onThemeToggleChange(this)"><span class="switch"></span></label></div>
-        <div class="settings-section"><div class="settings-title">Блоки на главной странице</div><label class="switch-row"><span>🩸 Глюкоза</span><input type="checkbox" id="set-glucose" checked><span class="switch"></span></label><label class="switch-row"><span>💓 Давление и пульс</span><input type="checkbox" id="set-vitals" checked><span class="switch"></span></label><label class="switch-row"><span>🥗 Питание</span><input type="checkbox" id="set-food" checked><span class="switch"></span></label><div class="message" id="settings-msg"></div></div>
-        <div class="settings-section"><div class="settings-title" id="wa-summary">🔐 Биометрия</div><p class="muted" id="wa-hint">Быстрый вход по биометрии этого устройства, без пароля.</p><label class="switch-row"><span id="wa-toggle-label">Вход по биометрии</span><input type="checkbox" id="wa-toggle" onchange="onWaToggleChange(this)"><span class="switch"></span></label><p class="muted" id="wa-availability"></p><div class="message" id="wa-msg"></div></div>
-        <div class="settings-section"><div class="settings-title">Персональные диапазоны нормы</div><p class="muted">Используются только для справочной подсветки. Если врач указал другие целевые значения, впишите их здесь.</p><label class="switch-row"><span>Использовать значения по умолчанию</span><input type="checkbox" id="ranges-default-toggle" onchange="onRangesDefaultToggleChange(this)"><span class="switch"></span></label><div id="range-inputs">
-          <div class="range-row"><span>Глюкоза натощак, ммоль/л</span><input class="decimal-input" type="text" inputmode="decimal" id="range-glucose_fasting-low" oninput="scheduleSaveRanges()"><input class="decimal-input" type="text" inputmode="decimal" id="range-glucose_fasting-high" oninput="scheduleSaveRanges()"></div>
-          <div class="range-row"><span>Глюкоза после еды, ммоль/л</span><input class="decimal-input" type="text" inputmode="decimal" id="range-glucose_post-low" oninput="scheduleSaveRanges()"><input class="decimal-input" type="text" inputmode="decimal" id="range-glucose_post-high" oninput="scheduleSaveRanges()"></div>
-          <div class="range-row"><span>Систолическое, мм рт. ст.</span><input type="number" step="1" id="range-systolic-low" oninput="scheduleSaveRanges()"><input type="number" step="1" id="range-systolic-high" oninput="scheduleSaveRanges()"></div>
-          <div class="range-row"><span>Диастолическое, мм рт. ст.</span><input type="number" step="1" id="range-diastolic-low" oninput="scheduleSaveRanges()"><input type="number" step="1" id="range-diastolic-high" oninput="scheduleSaveRanges()"></div>
-          <div class="range-row"><span>Пульс, уд/мин</span><input type="number" step="1" id="range-pulse-low" oninput="scheduleSaveRanges()"><input type="number" step="1" id="range-pulse-high" oninput="scheduleSaveRanges()"></div>
-        </div><div class="message" id="ranges-msg"></div></div>
-      </details></div>
+  <script src="/pdf.min.js"></script>
 
-      {% if is_admin %}
-      <div class="card"><details><summary>👥 Пользователи</summary><form id="user-form"><label>Логин</label><input name="username" maxlength="64" autocomplete="off" required><label>Отображаемое имя</label><input name="display_name" maxlength="100" required><label>Пароль</label><input name="password" type="password" minlength="8" autocomplete="new-password" required><button type="submit">Добавить пользователя</button><div class="message" id="user-msg"></div></form><form id="user-edit-form" hidden><div class="edit-title" id="user-edit-title">✏️ Редактирование пользователя</div><label>Логин</label><input name="username" maxlength="64" autocomplete="off" required><label>Отображаемое имя</label><input name="display_name" maxlength="100" required><label>Новый пароль</label><input name="password" type="password" minlength="8" autocomplete="new-password"><button type="submit">Сохранить</button><button type="button" class="secondary" onclick="cancelUserEdit()">Отмена</button><div class="message" id="user-edit-msg"></div></form><div class="table-wrap"><table id="users-table"><thead><tr><th>Имя</th><th>Логин</th><th></th></tr></thead><tbody></tbody></table></div></details></div>
-      <div class="card"><details><summary>🗄️ Резервные копии БД</summary><p class="muted" id="backup-status">Загрузка статуса…</p><button type="button" class="button" onclick="runBackupNow()">Снять копию сейчас</button><div class="message" id="backup-msg"></div><div class="table-wrap"><table id="backup-table"><thead><tr><th>Файл</th><th>Создан</th><th>Размер</th></tr></thead><tbody></tbody></table></div></details></div>
-      {% endif %}
-    </section>
-</main></div>
-<nav class="tab-bar" aria-label="Основная навигация"><button type="button" class="tab-btn" id="tab-btn-input" onclick="showPage('input')"><span class="tab-icon">📝</span><span>Ввод</span></button><button type="button" class="tab-btn" id="tab-btn-history" onclick="showPage('history')"><span class="tab-icon">▥</span><span>История</span></button><button type="button" class="tab-btn" id="tab-btn-settings" onclick="showPage('settings')"><span class="tab-icon">⚙️</span><span>Ещё</span></button></nav>
-<div id="entry-modal" class="modal" hidden><div class="modal-panel"><div class="modal-grabber"></div><div class="modal-head"><div id="modal-icon" class="quick-icon glucose">💧</div><div class="modal-title"><h2 id="modal-title">Глюкоза</h2><p id="modal-subtitle">Ввод показателя</p></div><button type="button" class="close-btn" onclick="closeEntry()">×</button></div>
-<form id="glucose-form" hidden><div class="metric-hero"><label>Значение, ммоль/л</label><div class="metric-input"><input name="value" class="decimal-input" type="text" inputmode="decimal" pattern="[0-9]+([.,][0-9]+)?" required><span class="metric-unit">ммоль/л</span></div><div class="metric-status"><p class="field-hint" id="hint-glucose"></p></div></div><label>Контекст измерения</label><div class="segmented"><input type="radio" id="gt_fasting" name="glucose_type" value="fasting" checked><label for="gt_fasting">🌅 Натощак</label><input type="radio" id="gt_postmeal" name="glucose_type" value="post_meal"><label for="gt_postmeal">🍽️ После еды</label></div><label>Дата и время</label><input name="measured_at" type="datetime-local" class="dt"><label>Комментарий <span class="muted">(необязательно)</span></label><textarea name="comment" maxlength="1000" placeholder="Например: хорошее самочувствие"></textarea><button type="button" class="quick-repeat" onclick="repeatLast('glucose', event)">↻ Повторить последнее</button><p class="last-entry-status muted" id="last-status-glucose"></p><button type="submit" class="primary-action">Сохранить измерение</button><div class="message" id="glucose-msg"></div></form>
-<form id="vitals-form" hidden><div class="vitals-entry"><div class="bp-field"><div class="bp-caption">Систолическое · мм рт. ст.</div><input name="systolic" type="number" min="30" max="400" inputmode="numeric" required><p class="field-hint" id="hint-systolic"></p></div><div class="bp-field"><div class="bp-caption">Диастолическое · мм рт. ст.</div><input name="diastolic" type="number" min="10" max="300" inputmode="numeric" required><p class="field-hint" id="hint-diastolic"></p></div></div><div class="bp-field pulse-field"><div class="bp-caption">Пульс · уд/мин</div><input name="pulse" type="number" min="20" max="300" inputmode="numeric"><p class="field-hint" id="hint-pulse"></p></div><label>Дата и время</label><input name="measured_at" type="datetime-local" class="dt"><label>Комментарий <span class="muted">(необязательно)</span></label><textarea name="comment" maxlength="1000" placeholder="Например: после прогулки"></textarea><button type="button" class="quick-repeat" onclick="repeatLast('vitals', event)">↻ Повторить последнее</button><p class="last-entry-status muted" id="last-status-vitals"></p><button type="submit" class="primary-action">Сохранить измерение</button><div class="message" id="vitals-msg"></div></form>
-<form id="food-form" hidden><div class="food-line"><label style="margin-top:0">Продукт</label><input name="food_name" maxlength="150" required placeholder="Например: овсяная каша"><div class="row"><div><label>Количество</label><input name="amount_value" class="decimal-input" type="text" inputmode="decimal" required></div><div><label>Единица</label><select name="amount_unit"><option value="г">г</option><option value="мл">мл</option><option value="шт">шт</option><option value="порция">порция</option></select></div></div></div><label>Дата и время</label><input name="consumed_at" type="datetime-local" class="dt"><label>Комментарий <span class="muted">(необязательно)</span></label><textarea name="comment" maxlength="1000"></textarea><button type="button" class="quick-repeat" onclick="repeatLast('food', event)">↻ Повторить последнее</button><p class="last-entry-status muted" id="last-status-food"></p><button type="submit" class="primary-action">Сохранить запись</button><div class="message" id="food-msg"></div></form>
-</div></div>
-<div id="pdf-overlay" hidden><div class="pdf-toolbar"><button type="button" class="pdf-btn" onclick="zoomPdf(-1)">➖</button><span id="zoom-label">100%</span><button type="button" class="pdf-btn" onclick="zoomPdf(1)">➕</button><span class="pdf-title">📄 Медицинский дневник</span><button type="button" class="pdf-btn" onclick="sharePdf()">📤</button><button type="button" class="pdf-btn" onclick="closePdfViewer()">❌</button></div><div id="pdf-pages"></div></div>
-<script src="/pdf.min.js"></script>
-<script>
-
-function openEntry(type){
-  var modal=document.getElementById('entry-modal'); if(!modal)return;
-  ['glucose','vitals','food'].forEach(function(k){var f=document.getElementById(k+'-form'); if(f)f.hidden=(k!==type);});
-  var cfg={glucose:['Глюкоза','Ввод показателя','💧','glucose'],vitals:['Давление и пульс','Ввод показателей','♥','vitals'],food:['Питание','Новая запись','🍴','food']}[type];
-  document.getElementById('modal-title').textContent=cfg[0]; document.getElementById('modal-subtitle').textContent=cfg[1];
-  var icon=document.getElementById('modal-icon'); icon.textContent=cfg[2]; icon.className='quick-icon '+cfg[3];
-  modal.hidden=false; document.body.style.overflow='hidden';
-  var form=document.getElementById(type+'-form'); if(form){var dt=form.querySelector('.dt');if(dt&&!dt.value)dt.value=localDateTime();}
-  loadOneLastStatus(type);
-}
-function closeEntry(){var m=document.getElementById('entry-modal');if(m)m.hidden=true;document.body.style.overflow='';}
-document.getElementById('entry-modal').addEventListener('click',function(e){if(e.target===this)closeEntry();});
-function todayHuman(){var d=new Date();var months=['января','февраля','марта','апреля','мая','июня','июля','августа','сентября','октября','ноября','декабря'];return d.getDate()+' '+months[d.getMonth()]+' '+d.getFullYear();}
-document.getElementById('today-label').textContent='Сегодня, '+todayHuman();
-function loadDashboard(){
-  var box=document.getElementById('dashboard-recent'); if(!box)return;
-  fetch('/api/history?date_from='+encodeURIComponent(localDate(-6))+'&date_to='+encodeURIComponent(localDate(0))+'&type=all&sort=date').then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.json();}).then(function(out){
-    var entries=out.entries||[]; box.innerHTML=''; entries.slice(0,3).forEach(function(e){var c=document.createElement('div');c.className='recent-card';var icon=document.createElement('div');icon.className='history-icon '+e.type;icon.textContent=e.type==='glucose'?'💧':e.type==='vitals'?'♥':'🍴';c.appendChild(icon);var copy=document.createElement('div');copy.className='recent-copy';var t=document.createElement('div');t.className='recent-title';t.textContent=e.type==='glucose'?'Глюкоза':e.type==='vitals'?'Давление и пульс':'Питание';copy.appendChild(t);var v=document.createElement('div');v.className='recent-value';if(e.type==='glucose')v.textContent=Number(e.value_mmol_l).toFixed(1)+' ммоль/л · '+(e.glucose_type==='fasting'?'натощак':'после еды');else if(e.type==='vitals')v.textContent=e.systolic_mmhg+' / '+e.diastolic_mmhg+' мм рт. ст. · пульс '+(e.pulse_bpm==null?'—':e.pulse_bpm);else v.textContent=e.food_name+' · '+e.amount_value+' '+e.amount_unit;copy.appendChild(v);c.appendChild(copy);var tm=document.createElement('div');tm.className='recent-time';tm.textContent=(e.measured_at||'').substring(11,16);c.appendChild(tm);box.appendChild(c);});if(!entries.length)box.innerHTML='<div class="muted">Пока нет записей</div>';
-    var today=localDate(0), counts={glucose:0,vitals:0,food:0}; entries.forEach(function(e){if((e.measured_at||'').substring(0,10)===today)counts[e.type]++;}); document.getElementById('sum-glucose').textContent=counts.glucose;document.getElementById('sum-vitals').textContent=counts.vitals;document.getElementById('sum-food').textContent=counts.food;document.getElementById('sum-total').textContent=counts.glucose+counts.vitals+counts.food;
-  }).catch(function(){box.innerHTML='<div class="muted">Не удалось загрузить последние записи</div>';});
-}
-loadDashboard();
+  <script>
     var csrf = document.querySelector('meta[name="csrf-token"]').content;
     var IS_ADMIN = {{ is_admin }};
     var USER_ID = {{ user_id }};
@@ -2524,7 +3149,7 @@ function showPage(name) {
     var pageEl = document.getElementById('page-' + p);
     var btnEl = document.getElementById('tab-btn-' + p);
     if (pageEl) { pageEl.hidden = (p !== name); }
-    if (btnEl) { btnEl.classList.toggle('active', p === name); btnEl.setAttribute('aria-current', p === name ? 'page' : 'false'); }
+    if (btnEl) { btnEl.classList.toggle('active', p === name); }
   });
   try { localStorage.setItem('medical_diary_active_tab', name); } catch (e) {}
   if (name === 'history') { loadHistory(); }
@@ -2590,12 +3215,6 @@ async function repeatLast(type, ev) {
   } catch (err) {
     showToast(friendlyErrorMessage(err), false);
   }
-}
-
-
-function fmtDateRuLong(day) {
-  var months = ['января','февраля','марта','апреля','мая','июня','июля','августа','сентября','октября','ноября','декабря'];
-  try { var d = new Date(day + 'T00:00:00'); return d.getDate() + ' ' + months[d.getMonth()] + ' ' + d.getFullYear() + ' г.'; } catch(e) { return day; }
 }
 
 function relativeDayLabel(measuredAt) {
@@ -3125,97 +3744,86 @@ function updateDateLabels() {
       var hp = historyParams();
       var df = hp.df;
       var dt = hp.dt;
-      var cards = document.getElementById('history-cards');
       var tbody = document.querySelector('#history-table tbody');
-      if (cards) { cards.innerHTML = '<div class="muted">Загрузка…</div>'; }
-      if (tbody) { tbody.innerHTML = ''; }
+      tbody.innerHTML = '<tr class="history-empty"><td colspan="4">Загрузка…</td></tr>';
       try {
         var res = await fetch('/api/history?date_from=' + encodeURIComponent(df) + '&date_to=' + encodeURIComponent(dt) + '&type=' + encodeURIComponent(hp.type) + '&sort=' + encodeURIComponent(hp.sort));
         if (res.status === 401) { window.location = '/login'; return; }
         var out = await res.json();
         if (!res.ok) { throw new Error(out.error || ('HTTP ' + res.status)); }
 
-        if (cards) { cards.innerHTML = ''; }
+        tbody.innerHTML = '';
+
+        if (out.entries.length === 0) {
+          var emptyRow = document.createElement('tr');
+          emptyRow.className = 'history-empty';
+          var emptyTd = document.createElement('td');
+          emptyTd.colSpan = 4;
+          emptyTd.textContent = 'Нет записей за выбранный период';
+          emptyRow.appendChild(emptyTd);
+          tbody.appendChild(emptyRow);
+        }
+
         var lastDay = null;
         var groupByDay = (hp.sort === 'date');
 
-        function addDay(day) {
-          if (!cards) return;
-          var heading = document.createElement('div');
-          heading.className = 'history-day-title';
-          heading.innerHTML = '<span>' + fmtDateRuLong(day) + '</span>';
-          var today = localDate(0), yesterday = localDate(-1);
-          if (day === today) { heading.innerHTML += '<span class="day-chip">Сегодня</span>'; }
-          else if (day === yesterday) { heading.innerHTML += '<span class="day-chip">Вчера</span>'; }
-          cards.appendChild(heading);
-        }
-
-        function makeActionButton(text, cls, label, handler) {
-          var b = document.createElement('button'); b.type='button'; b.className='icon-btn' + (cls ? ' '+cls : '');
-          b.textContent=text; b.setAttribute('aria-label', label); b.addEventListener('click', handler); return b;
-        }
-        function statusBadge(status, text) {
-          var span = document.createElement('span'); span.className='status-badge status-' + (status || 'ok'); span.textContent=text; return span;
-        }
-        function appendComment(parent, text) {
-          if (!text) return; var c=document.createElement('div'); c.className='comment-line'; c.textContent=text; parent.appendChild(c);
-        }
-        function renderGlucose(entry) {
-          var card=document.createElement('article'); card.className='history-entry';
-          var top=document.createElement('div'); top.className='history-entry-top';
-          var icon=document.createElement('div'); icon.className='history-icon'; icon.textContent='💧'; top.appendChild(icon);
-          var main=document.createElement('div'); main.className='history-entry-main';
-          var title=document.createElement('div'); title.className='history-entry-title'; title.textContent='Глюкоза'; main.appendChild(title);
-          var meta=document.createElement('div'); meta.className='history-entry-meta'; meta.textContent=(entry.glucose_type === 'fasting' ? 'Натощак' : 'После еды') + ' · ' + (entry.measured_at ? entry.measured_at.substring(11,16) : ''); main.appendChild(meta); top.appendChild(main); card.appendChild(top);
-          var val=document.createElement('div'); val.className='history-value';
-          var num=document.createElement('span'); num.className='number'; num.textContent=Number(entry.value_mmol_l).toFixed(1); val.appendChild(num);
-          var unit=document.createElement('span'); unit.className='unit'; unit.textContent='ммоль/л'; val.appendChild(unit);
-          card.appendChild(val);
-          var text = entry.status === 'high' ? '▲ Выше диапазона' : entry.status === 'low' ? '▼ Ниже диапазона' : '✓ В пределах диапазона';
-          card.appendChild(statusBadge(entry.status, text)); appendComment(card, entry.comment);
-          return card;
-        }
-        function renderVitals(entry) {
-          var card=document.createElement('article'); card.className='history-entry';
-          var top=document.createElement('div'); top.className='history-entry-top';
-          var icon=document.createElement('div'); icon.className='history-icon'; icon.textContent='💓'; top.appendChild(icon);
-          var main=document.createElement('div'); main.className='history-entry-main';
-          var title=document.createElement('div'); title.className='history-entry-title'; title.textContent='Давление и пульс'; main.appendChild(title);
-          var meta=document.createElement('div'); meta.className='history-entry-meta'; meta.textContent=(entry.measured_at ? entry.measured_at.substring(11,16) : ''); main.appendChild(meta); top.appendChild(main); card.appendChild(top);
-          var vals=document.createElement('div'); vals.className='vitals-values';
-          var bp=document.createElement('div'); var lab=document.createElement('div'); lab.className='vital-label'; lab.textContent='Давление'; bp.appendChild(lab); var pn=document.createElement('div'); pn.className='pressure-number'; pn.textContent=entry.systolic_mmhg + ' / ' + entry.diastolic_mmhg; bp.appendChild(pn); var pu=document.createElement('div'); pu.className='pressure-unit'; pu.textContent='мм рт. ст.'; bp.appendChild(pu); vals.appendChild(bp);
-          var div=document.createElement('div'); div.className='vitals-divider'; vals.appendChild(div);
-          var pulse=document.createElement('div'); var pl=document.createElement('div'); pl.className='vital-label'; pl.textContent='Пульс'; pulse.appendChild(pl); var pnum=document.createElement('div'); pnum.className='pressure-number'; pnum.textContent=entry.pulse_bpm == null ? '—' : entry.pulse_bpm; pulse.appendChild(pnum); var punit=document.createElement('div'); punit.className='pulse-unit'; punit.textContent='уд/мин'; pulse.appendChild(punit); vals.appendChild(pulse); card.appendChild(vals);
-          var statuses=document.createElement('div'); statuses.className='vital-statuses';
-          function addVitalStatus(st, labelText, caption){ var item=document.createElement('div'); item.className='vital-status-item'; item.appendChild(statusBadge(st, st==='high'?'▲ Выше':st==='low'?'▼ Ниже':'✓ В норме')); var cap=document.createElement('div'); cap.className='vital-caption'; cap.textContent=caption; item.appendChild(cap); statuses.appendChild(item); }
-          addVitalStatus(entry.systolic_status,'', 'систолическое'); addVitalStatus(entry.diastolic_status,'', 'диастолическое');
-          if (entry.pulse_bpm != null) { addVitalStatus(entry.pulse_status || 'ok','', 'пульс'); } else { var empty=document.createElement('div'); empty.className='vital-status-item'; empty.innerHTML='<div class="vital-caption">Пульс не указан</div>'; statuses.appendChild(empty); }
-          card.appendChild(statuses); appendComment(card, entry.comment);
-          return card;
-        }
-        function renderFood(entry) {
-          var card=document.createElement('article'); card.className='history-entry';
-          var top=document.createElement('div'); top.className='history-entry-top'; var icon=document.createElement('div'); icon.className='history-icon'; icon.textContent='🥗'; top.appendChild(icon); var main=document.createElement('div'); main.className='history-entry-main'; var title=document.createElement('div'); title.className='history-entry-title'; title.textContent='Питание'; main.appendChild(title); var meta=document.createElement('div'); meta.className='history-entry-meta'; meta.textContent=(entry.measured_at ? entry.measured_at.substring(11,16) : ''); main.appendChild(meta); top.appendChild(main); card.appendChild(top);
-          var line=document.createElement('div'); line.className='food-line'; line.textContent=entry.food_name + ' · '; var amount=document.createElement('span'); amount.className='food-amount'; amount.textContent=(Number(entry.amount_value).toLocaleString('ru-RU') + ' ' + (entry.amount_unit || '')); line.appendChild(amount); card.appendChild(line); appendComment(card, entry.comment); return card;
-        }
-
         out.entries.forEach(function(entry) {
-          if (groupByDay) { var day=(entry.measured_at||'').substring(0,10); if(day!==lastDay){lastDay=day; addDay(day);} }
-          var card = entry.type==='glucose' ? renderGlucose(entry) : entry.type==='vitals' ? renderVitals(entry) : renderFood(entry);
-          var actions=document.createElement('div'); actions.className='history-actions';
-          actions.appendChild(makeActionButton('✏️','', 'Редактировать запись', function(){startEdit(entry);}));
-          actions.appendChild(makeActionButton('🗑️','delete', 'Удалить запись', function(){deleteEntry(entry);})); card.appendChild(actions);
-          if (cards) cards.appendChild(card);
+          if (groupByDay) {
+            var day = (entry.measured_at || '').substring(0, 10);
+            if (day !== lastDay) {
+              lastDay = day;
+              var dayTr = document.createElement('tr');
+              dayTr.className = 'day-row';
+              var dayTd = document.createElement('td');
+              dayTd.colSpan = 4;
+              dayTd.textContent = fmtDateRu(day);
+              dayTr.appendChild(dayTd);
+              tbody.appendChild(dayTr);
+            }
+          }
+
+          var tr = document.createElement('tr');
+
+          var td1 = document.createElement('td');
+          td1.textContent = entry.measured_at_ru || fmtDateTimeRu(entry.measured_at);
+          tr.appendChild(td1);
+
+          var td2 = document.createElement('td');
+          td2.textContent = entry.type_label;
+          tr.appendChild(td2);
+
+          var td3 = document.createElement('td');
+          if (entry.display_html) { td3.innerHTML = entry.display_html; } else { td3.textContent = entry.display; }
+          tr.appendChild(td3);
+
+          var td5 = document.createElement('td');
+          var eb = document.createElement('button');
+          eb.type = 'button';
+          eb.className = 'edit-btn';
+          eb.textContent = '✏️';
+          eb.setAttribute('aria-label', 'Редактировать запись');
+          eb.addEventListener('click', function() { startEdit(entry); });
+          td5.appendChild(eb);
+
+          var dbtn = document.createElement('button');
+          dbtn.type = 'button';
+          dbtn.className = 'del-btn';
+          dbtn.textContent = '🗑️';
+          dbtn.setAttribute('aria-label', 'Удалить запись');
+          dbtn.addEventListener('click', function() { deleteEntry(entry); });
+          td5.appendChild(dbtn);
+
+          tr.appendChild(td5);
+
+          tbody.appendChild(tr);
         });
 
-        if (out.entries.length === 0 && cards) { var empty=document.createElement('div'); empty.className='muted'; empty.style.padding='16px 2px'; empty.textContent='Нет записей за выбранный период'; cards.appendChild(empty); }
-        var count=document.getElementById('history-count'); if(count) count.textContent='Записей: ' + out.entries.length;
         renderTrendCharts(out.entries);
+
         currentExportUrl = '/export.pdf?date_from=' + encodeURIComponent(df) + '&date_to=' + encodeURIComponent(dt) + '&type=' + encodeURIComponent(hp.type) + '&sort=' + encodeURIComponent(hp.sort);
-        setMsg('history-msg', '', true);
+        setMsg('history-msg', 'Записей: ' + out.entries.length, true);
       } catch (err) {
-        if (cards) { cards.innerHTML=''; }
-        var count=document.getElementById('history-count'); if(count) count.textContent='Записей: —';
+        tbody.innerHTML = '';
         setMsg('history-msg', friendlyErrorMessage(err), false);
       }
     }
@@ -3855,13 +4463,10 @@ function updateDateLabels() {
 })();
 
 loadHistory();
+ </script>
 
-(function(){
-  var originalLoadLast=window.loadLastEntryStatuses;
-  if(typeof originalLoadLast==='function') window.loadLastEntryStatuses=function(){originalLoadLast();loadDashboard();};
-  document.addEventListener('visibilitychange',function(){if(!document.hidden)loadDashboard();});
-})();
-</script></body></html>
+</body>
+</html>
 """
 
 
