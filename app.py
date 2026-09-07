@@ -1183,6 +1183,8 @@ def api_last_entry():
             glucose_type=r["glucose_type"],
             value=float(r["value_mmol_l"]),
             comment=r["comment"] or "",
+            measured_at=r["measured_at"],
+            measured_at_ru=format_dt_ru(r["measured_at"]),
         )
     if entry_type == "vitals":
         r = db.execute(
@@ -1197,6 +1199,8 @@ def api_last_entry():
             diastolic=r["diastolic_mmhg"],
             pulse=r["pulse_bpm"],
             comment=r["comment"] or "",
+            measured_at=r["measured_at"],
+            measured_at_ru=format_dt_ru(r["measured_at"]),
         )
     r = db.execute(
         "SELECT * FROM food_entries WHERE user_id = ? AND deleted_at IS NULL ORDER BY consumed_at DESC LIMIT 1",
@@ -1210,6 +1214,8 @@ def api_last_entry():
         amount_value=float(r["amount_value"]),
         amount_unit=r["amount_unit"],
         comment=r["comment"] or "",
+        measured_at=r["consumed_at"],
+        measured_at_ru=format_dt_ru(r["consumed_at"]),
     )
 
 
@@ -2297,7 +2303,7 @@ LOGIN_HTML = """<!doctype html>
         console.log('WebAuthn login attempt failed:', err && err.message);
         if (!silent) {
           var el = document.getElementById('wa-login-msg');
-          el.textContent = err.message;
+          el.textContent = friendlyErrorMessage(err);
         }
       }
     }
@@ -2394,14 +2400,33 @@ APP_HTML = """<!doctype html>
     }
     button, .button {
       display: block; width: 100%; max-width: 100%; min-height: 52px;
-      border: 1px solid transparent; border-radius: 12px; background: #3a6ea5; color: #fff;
+      border: 1px solid rgba(255,255,255,.35); border-radius: 22px;
+      background: linear-gradient(180deg, rgba(83,138,192,.65), rgba(58,110,165,.55));
+      -webkit-backdrop-filter: blur(18px) saturate(180%);
+      backdrop-filter: blur(18px) saturate(180%);
+      box-shadow:
+        inset 0 1px 1px rgba(255,255,255,.5),
+        inset 0 -1px 3px rgba(0,0,0,.12),
+        0 4px 14px rgba(58,110,165,.28);
+      color: #fff;
       font-size: 18px; font-weight: 600; text-align: center; text-decoration: none;
       line-height: 52px; margin-top: 14px; cursor: pointer;
+      transition: transform .12s ease, box-shadow .12s ease, opacity .12s ease;
     }
-    button.danger { background: #c0392b; min-height: 44px; line-height: 44px; font-size: 16px; margin-top: 0; }
-    button.secondary { background: #8e8e93; }
-    button.edit-btn { width: auto; min-height: 40px; line-height: 40px; font-size: 16px; margin-top: 0; padding: 0 12px; }
-    button.del-btn { width: auto; min-height: 40px; line-height: 40px; font-size: 16px; margin-top: 0; padding: 0 10px; margin-left: 6px; }
+    button:active, .button:active {
+      transform: scale(.97);
+      box-shadow: inset 0 1px 4px rgba(0,0,0,.22), inset 0 -1px 1px rgba(255,255,255,.2);
+    }
+    button:disabled, .button:disabled { opacity: .5; transform: none; cursor: default; }
+    button.danger {
+      background: linear-gradient(180deg, rgba(212,84,68,.65), rgba(192,57,43,.55));
+      min-height: 44px; line-height: 44px; font-size: 16px; margin-top: 0;
+    }
+    button.secondary {
+      background: linear-gradient(180deg, rgba(158,158,163,.55), rgba(142,142,147,.5));
+    }
+    button.edit-btn { width: auto; min-height: 40px; line-height: 40px; font-size: 16px; margin-top: 0; padding: 0 12px; border-radius: 20px; }
+    button.del-btn { width: auto; min-height: 40px; line-height: 40px; font-size: 16px; margin-top: 0; padding: 0 10px; margin-left: 6px; border-radius: 20px; }
     .cell-actions { display: flex; gap: 6px; }
     .cell-actions button { margin-left: 0; }
     [hidden] { display: none !important; }
@@ -2413,7 +2438,7 @@ APP_HTML = """<!doctype html>
     }
     .pdf-toolbar { display: flex; align-items: center; gap: 10px; background: #fff; padding: 10px 12px; }
     .pdf-title { flex: 1; min-width: 0; font-weight: 700; font-size: 17px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .pdf-btn { width: auto; min-height: 44px; line-height: 44px; margin: 0; padding: 0 14px; font-size: 20px; }
+    .pdf-btn { width: auto; min-height: 44px; line-height: 44px; margin: 0; padding: 0 14px; font-size: 20px; border-radius: 18px; }
     #zoom-label { min-width: 52px; text-align: center; font-weight: 700; font-size: 15px; color: #333; }
     #pdf-pages { flex: 1; overflow: auto; -webkit-overflow-scrolling: touch; padding: 10px; }
     #pdf-pages canvas { display: block; margin: 0 auto 10px; background: #fff; border-radius: 4px; box-shadow: 0 1px 4px rgba(0,0,0,.4); }
@@ -2477,8 +2502,14 @@ APP_HTML = """<!doctype html>
 .switch-row input:checked + .switch::after { left: 22px; }
 
 .field-hint { margin: 2px 0 0; font-size: 13px; color: #8e8e93; }
-.quick-repeat { background: #eaf1f7; color: #3a6ea5; }
-.quick-repeat:active { opacity: .7; }
+.last-entry-status { margin: 6px 0 0; font-size: 13px; color: #6b6b70; }
+.quick-repeat {
+  background: rgba(58,110,165,.12); color: #3a6ea5; border: 1px solid rgba(58,110,165,.18);
+  -webkit-backdrop-filter: blur(14px) saturate(160%);
+  backdrop-filter: blur(14px) saturate(160%);
+  box-shadow: inset 0 1px 1px rgba(255,255,255,.6);
+}
+.quick-repeat:active { transform: scale(.97); }
 
 #toast {
   position: fixed; left: 12px; right: 12px; z-index: 200;
@@ -2502,25 +2533,47 @@ APP_HTML = """<!doctype html>
 .trend-chart-wrap canvas { width: 100%; height: 150px; display: block; }
 .trend-chart-title { font-size: 14px; font-weight: 700; color: #444; margin: 12px 0 2px; }
 .chart-legend { font-size: 11px; color: #8e8e93; margin: 2px 0 0; line-height: 1.4; }
+.preset-row { display: flex; gap: 8px; margin: 4px 0 10px; }
+.preset-btn {
+  flex: 1 1 0; width: auto; min-height: 34px; line-height: 34px; margin-top: 0;
+  padding: 0 6px; font-size: 13px; font-weight: 500; border-radius: 17px;
+  background: rgba(58,110,165,.1); color: #3a6ea5; border: 1px solid rgba(58,110,165,.16);
+  -webkit-backdrop-filter: blur(14px) saturate(160%);
+  backdrop-filter: blur(14px) saturate(160%);
+  box-shadow: inset 0 1px 1px rgba(255,255,255,.6);
+}
+.preset-btn:active { transform: scale(.95); }
 
 .range-row { display: grid; grid-template-columns: 1fr 70px 70px; gap: 8px; align-items: center; margin: 8px 0; }
 .range-row span { font-size: 15px; color: #333; }
 .range-row input { min-height: 40px; font-size: 15px; padding: 4px 6px; }
-.settings-reset { background: #8e8e93; margin-top: 10px; }
 
 .tab-bar {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 50;
-  display: flex; background: #fff; border-top: 1px solid #ddd;
+  display: flex; gap: 4px;
+  background: rgba(255,255,255,.65);
+  -webkit-backdrop-filter: blur(24px) saturate(180%);
+  backdrop-filter: blur(24px) saturate(180%);
+  border-top: 1px solid rgba(255,255,255,.5);
+  box-shadow: 0 -1px 12px rgba(0,0,0,.06);
   padding: 4px env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
 }
 .tab-btn {
   flex: 1 1 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
-  gap: 2px; padding: 6px 2px; background: none; border: 0; color: #8e8e93;
-  font-size: 11px; min-height: 52px; margin: 0; line-height: 1.2; cursor: pointer;
+  gap: 2px; margin: 4px 3px; padding: 6px 2px; background: none; border: 1px solid transparent;
+  border-radius: 18px; color: #8e8e93;
+  font-size: 11px; min-height: 48px; line-height: 1.2; cursor: pointer;
   -webkit-tap-highlight-color: transparent;
+  transition: background .15s ease, transform .12s ease;
 }
+.tab-btn:active { transform: scale(.94); }
 .tab-btn .tab-icon { font-size: 22px; line-height: 1; }
-.tab-btn.active { color: #3a6ea5; }
+.tab-btn.active {
+  color: #3a6ea5;
+  background: rgba(58,110,165,.12);
+  border: 1px solid rgba(58,110,165,.16);
+  box-shadow: inset 0 1px 1px rgba(255,255,255,.6);
+}
 
 html.theme-dark body { background: #000; }
 html.theme-dark header { background: #1c1c1e; border-bottom-color: #2c2c2e; }
@@ -2530,35 +2583,50 @@ html.theme-dark summary, html.theme-dark .settings-title, html.theme-dark .edit-
 html.theme-dark label { color: #d1d1d6; }
 html.theme-dark input, html.theme-dark select, html.theme-dark textarea { background: #2c2c2e; border-color: #3a3a3c; color: #f2f2f7; }
 html.theme-dark button, html.theme-dark .button {
-  background: #000; color: #f2f2f7; border: 1px solid rgba(255,255,255,.4);
+  background: linear-gradient(180deg, rgba(255,255,255,.16), rgba(255,255,255,.06));
+  color: #f2f2f7; border: 1px solid rgba(255,255,255,.4);
+  box-shadow: inset 0 1px 1px rgba(255,255,255,.25), inset 0 -1px 3px rgba(0,0,0,.4), 0 4px 14px rgba(0,0,0,.35);
 }
-html.theme-dark button.secondary, html.theme-dark .settings-reset {
-  background: #000; color: #f2f2f7; border: 1px solid rgba(255,255,255,.4);
+html.theme-dark button.secondary {
+  background: linear-gradient(180deg, rgba(255,255,255,.12), rgba(255,255,255,.04));
+  color: #f2f2f7; border: 1px solid rgba(255,255,255,.4);
 }
 html.theme-dark button.danger {
-  background: #000; color: #ff6961; border: 1px solid rgba(255,105,97,.55);
+  background: linear-gradient(180deg, rgba(255,105,97,.22), rgba(255,105,97,.1));
+  color: #ff6961; border: 1px solid rgba(255,105,97,.55);
 }
 html.theme-dark .button-group label, html.theme-dark .date-btn { background: #2c2c2e; border-color: #3a3a3c; color: #f2f2f7; }
-html.theme-dark .button-group input:checked + label { background: #000; border-color: rgba(255,255,255,.5); color: #f2f2f7; }
-html.theme-dark .muted, html.theme-dark .field-hint, html.theme-dark .recommendation { color: #98989d; }
+html.theme-dark .button-group input:checked + label { background: rgba(255,255,255,.14); border-color: rgba(255,255,255,.5); color: #f2f2f7; }
+html.theme-dark .muted, html.theme-dark .field-hint, html.theme-dark .recommendation, html.theme-dark .last-entry-status { color: #98989d; }
 html.theme-dark th, html.theme-dark td { border-color: #3a3a3c; color: #f2f2f7; }
 html.theme-dark .day-row td { background: #2c2c2e; color: #c7c7cc; }
 html.theme-dark .about-note { color: #e5e5ea; }
-html.theme-dark .quick-repeat { background: #000; color: #f2f2f7; border: 1px solid rgba(100,181,255,.55); }
-html.theme-dark .tab-bar { background: #1c1c1e; border-top-color: #2c2c2e; }
-html.theme-dark .tab-btn.active { color: #fff; }
+html.theme-dark .quick-repeat { background: rgba(100,181,255,.14); color: #64b5ff; border: 1px solid rgba(100,181,255,.5); }
+html.theme-dark .preset-btn { background: rgba(255,255,255,.1); color: #f2f2f7; border: 1px solid rgba(255,255,255,.35); }
+html.theme-dark .tab-bar { background: rgba(28,28,30,.72); border-top-color: rgba(255,255,255,.12); }
+html.theme-dark .tab-btn.active { color: #fff; background: rgba(255,255,255,.14); border-color: rgba(255,255,255,.2); }
 html.theme-dark .trend-chart-title { color: #c7c7cc; }
 html.theme-dark .chart-legend { color: #7a7a7e; }
-html.theme-dark button.edit-btn { background: #000; color: #f2f2f7; border: 1px solid rgba(255,255,255,.4); }
-html.theme-dark button.del-btn { background: #000; color: #ff6961; border: 1px solid rgba(255,105,97,.55); }
+html.theme-dark button.edit-btn {
+  background: rgba(255,255,255,.12); color: #f2f2f7; border: 1px solid rgba(255,255,255,.3);
+}
+html.theme-dark button.del-btn {
+  background: rgba(255,105,97,.18); color: #ff6961; border: 1px solid rgba(255,105,97,.4);
+}
 
 button.edit-btn, button.del-btn {
   width: 36px; height: 36px; min-height: 36px; line-height: 36px;
   padding: 0; border-radius: 50%; font-size: 15px; margin-top: 0;
-  background: rgba(60,60,67,.08); color: #48484a;
+  background: rgba(60,60,67,.08); color: #48484a; border: 1px solid rgba(0,0,0,.06);
+  -webkit-backdrop-filter: blur(12px) saturate(160%);
+  backdrop-filter: blur(12px) saturate(160%);
+  box-shadow: inset 0 1px 1px rgba(255,255,255,.6), inset 0 -1px 1px rgba(0,0,0,.04);
+  transition: transform .12s ease;
 }
-button.del-btn { margin-left: 6px; background: rgba(192,57,43,.1); color: #c0392b; }
-button.edit-btn:active, button.del-btn:active { opacity: .55; }
+button.del-btn {
+  margin-left: 6px; background: rgba(192,57,43,.12); color: #c0392b; border: 1px solid rgba(192,57,43,.15);
+}
+button.edit-btn:active, button.del-btn:active { transform: scale(.9); }
 
 </style>
 </head>
@@ -2576,6 +2644,7 @@ button.edit-btn:active, button.del-btn:active { opacity: .55; }
    <details>
      <summary>🩸 Глюкоза</summary><form id="glucose-form">
           <button type="button" class="quick-repeat" onclick="repeatLast('glucose', event)">↻ Повторить последнее</button>
+          <p class="last-entry-status" id="last-status-glucose"></p>
 
           <label>Тип измерения</label>
           <div class="button-group" role="radiogroup" aria-label="Тип измерения глюкозы">
@@ -2586,7 +2655,7 @@ button.edit-btn:active, button.del-btn:active { opacity: .55; }
           </div>
 
           <label>Значение, ммоль/л</label>
-          <input name="value" type="number" step="0.1" min="0.1" max="100" inputmode="decimal" required>
+          <input name="value" class="decimal-input" type="text" inputmode="decimal" pattern="[0-9]+([.,][0-9]+)?" required>
           <p class="field-hint" id="hint-glucose"></p>
 
           <label>Дата и время</label>
@@ -2606,6 +2675,7 @@ button.edit-btn:active, button.del-btn:active { opacity: .55; }
 
      <summary>💓 Давление и пульс</summary><form id="vitals-form">
           <button type="button" class="quick-repeat" onclick="repeatLast('vitals', event)">↻ Повторить последнее</button>
+          <p class="last-entry-status" id="last-status-vitals"></p>
 
           <div class="row">
             <div>
@@ -2640,6 +2710,7 @@ button.edit-btn:active, button.del-btn:active { opacity: .55; }
    <details>
      <summary>🥗 Питание</summary><form id="food-form">
           <button type="button" class="quick-repeat" onclick="repeatLast('food', event)">↻ Повторить последнее</button>
+          <p class="last-entry-status" id="last-status-food"></p>
 
           <label>Продукт</label>
           <input name="food_name" maxlength="150" required>
@@ -2647,7 +2718,7 @@ button.edit-btn:active, button.del-btn:active { opacity: .55; }
           <div class="row">
             <div>
               <label>Количество</label>
-              <input name="amount_value" type="number" step="0.01" min="0.01" inputmode="decimal" required>
+              <input name="amount_value" class="decimal-input" type="text" inputmode="decimal" pattern="[0-9]+([.,][0-9]+)?" required>
             </div>
             <div>
               <label>Единица</label>
@@ -2684,7 +2755,7 @@ button.edit-btn:active, button.del-btn:active { opacity: .55; }
           <option value="post_meal">🍽️ После еды</option>
         </select>
         <label>Значение, ммоль/л</label>
-        <input id="edit_glucose_value" type="number" step="0.1" min="0.1" max="100" inputmode="decimal">
+        <input id="edit_glucose_value" class="decimal-input" type="text" inputmode="decimal" pattern="[0-9]+([.,][0-9]+)?">
       </div>
 
       <div id="edit-vitals" hidden>
@@ -2708,7 +2779,7 @@ button.edit-btn:active, button.del-btn:active { opacity: .55; }
         <div class="row">
           <div>
             <label>Количество</label>
-            <input id="edit_amount_value" type="number" step="0.01" min="0.01" inputmode="decimal">
+            <input id="edit_amount_value" class="decimal-input" type="text" inputmode="decimal" pattern="[0-9]+([.,][0-9]+)?">
           </div>
           <div>
             <label>Единица</label>
@@ -2752,6 +2823,12 @@ button.edit-btn:active, button.del-btn:active { opacity: .55; }
               <input type="date" id="date_to" aria-label="Дата конца периода">
             </span>
           </div>
+        </div>
+
+        <div class="preset-row">
+          <button type="button" class="preset-btn" onclick="setDateRangePreset(7)">7 дней</button>
+          <button type="button" class="preset-btn" onclick="setDateRangePreset(30)">30 дней</button>
+          <button type="button" class="preset-btn" onclick="setDateRangePreset(90)">3 месяца</button>
         </div>
 
         <label for="history_type">Показывать</label>
@@ -2880,8 +2957,8 @@ button.edit-btn:active, button.del-btn:active { opacity: .55; }
           <p class="muted">Используются только для справочной подсветки значений — не для диагностики. Если врач указал вам другие целевые значения, впишите их здесь. Значения сохраняются автоматически.</p>
           <label class="switch-row"><span>Использовать значения по умолчанию</span><input type="checkbox" id="ranges-default-toggle" onchange="onRangesDefaultToggleChange(this)"><span class="switch"></span></label>
           <div id="range-inputs">
-            <div class="range-row"><span>Глюкоза натощак, ммоль/л</span><input type="number" step="0.1" id="range-glucose_fasting-low" oninput="scheduleSaveRanges()"><input type="number" step="0.1" id="range-glucose_fasting-high" oninput="scheduleSaveRanges()"></div>
-            <div class="range-row"><span>Глюкоза после еды, ммоль/л</span><input type="number" step="0.1" id="range-glucose_post-low" oninput="scheduleSaveRanges()"><input type="number" step="0.1" id="range-glucose_post-high" oninput="scheduleSaveRanges()"></div>
+            <div class="range-row"><span>Глюкоза натощак, ммоль/л</span><input class="decimal-input" type="text" inputmode="decimal" pattern="[0-9]+([.,][0-9]+)?" id="range-glucose_fasting-low" oninput="scheduleSaveRanges()"><input class="decimal-input" type="text" inputmode="decimal" pattern="[0-9]+([.,][0-9]+)?" id="range-glucose_fasting-high" oninput="scheduleSaveRanges()"></div>
+            <div class="range-row"><span>Глюкоза после еды, ммоль/л</span><input class="decimal-input" type="text" inputmode="decimal" pattern="[0-9]+([.,][0-9]+)?" id="range-glucose_post-low" oninput="scheduleSaveRanges()"><input class="decimal-input" type="text" inputmode="decimal" pattern="[0-9]+([.,][0-9]+)?" id="range-glucose_post-high" oninput="scheduleSaveRanges()"></div>
             <div class="range-row"><span>Систолическое, мм рт. ст.</span><input type="number" step="1" id="range-systolic-low" oninput="scheduleSaveRanges()"><input type="number" step="1" id="range-systolic-high" oninput="scheduleSaveRanges()"></div>
             <div class="range-row"><span>Диастолическое, мм рт. ст.</span><input type="number" step="1" id="range-diastolic-low" oninput="scheduleSaveRanges()"><input type="number" step="1" id="range-diastolic-high" oninput="scheduleSaveRanges()"></div>
             <div class="range-row"><span>Пульс, уд/мин</span><input type="number" step="1" id="range-pulse-low" oninput="scheduleSaveRanges()"><input type="number" step="1" id="range-pulse-high" oninput="scheduleSaveRanges()"></div>
@@ -3015,7 +3092,7 @@ function bindSettings() {
       sendJSON('POST', '/api/settings', USER_SETTINGS).then(function() {
         setMsg('settings-msg', 'Сохранено', true);
       }).catch(function(err) {
-        setMsg('settings-msg', err.message, false);
+        setMsg('settings-msg', friendlyErrorMessage(err), false);
       });
     });
   });
@@ -3136,9 +3213,50 @@ async function repeatLast(type, ev) {
     }
     showToast('Поля заполнены последней записью — проверьте перед сохранением', true);
   } catch (err) {
-    showToast(err.message, false);
+    showToast(friendlyErrorMessage(err), false);
   }
 }
+
+function relativeDayLabel(measuredAt) {
+  if (!measuredAt) { return ''; }
+  var day = measuredAt.substring(0, 10);
+  var time = measuredAt.substring(11, 16);
+  var dayLabel;
+  if (day === localDate(0)) { dayLabel = 'сегодня'; }
+  else if (day === localDate(-1)) { dayLabel = 'вчера'; }
+  else { dayLabel = fmtDateLabel(day); }
+  return dayLabel + ', ' + time;
+}
+
+async function loadOneLastStatus(type) {
+  var el = document.getElementById('last-status-' + type);
+  if (!el) { return; }
+  try {
+    var res = await fetch('/api/last?type=' + type);
+    var out = await res.json();
+    if (!res.ok) { throw new Error(out.error || 'HTTP ' + res.status); }
+    if (!out.found) { el.textContent = 'Записей ещё не было'; return; }
+
+    var summary;
+    if (type === 'glucose') {
+      summary = out.value.toFixed(1) + ' ммоль/л (' + (out.glucose_type === 'fasting' ? 'натощак' : 'после еды') + ')';
+    } else if (type === 'vitals') {
+      summary = out.systolic + '/' + out.diastolic + (out.pulse != null ? ', пульс ' + out.pulse : '');
+    } else {
+      summary = out.food_name + ', ' + out.amount_value + ' ' + out.amount_unit;
+    }
+    el.textContent = 'Последняя запись: ' + relativeDayLabel(out.measured_at) + ' — ' + summary;
+  } catch (err) {
+    el.textContent = '';
+  }
+}
+
+function loadLastEntryStatuses() {
+  loadOneLastStatus('glucose');
+  loadOneLastStatus('vitals');
+  loadOneLastStatus('food');
+}
+loadLastEntryStatuses();
 
 var RANGE_KEYS = ['glucose_fasting', 'glucose_post', 'systolic', 'diastolic', 'pulse'];
 
@@ -3171,12 +3289,39 @@ function populateRangeInputs() {
 }
 populateRangeInputs();
 
+// Поля для дробных чисел сделаны type="text" вместо type="number",
+// потому что нативный number-инпут не принимает запятую как десятичный
+// разделитель ни при какой локали — а это стандартный способ ввода
+// дробей на русской клавиатуре. Здесь мягко приводим ввод к пригодному
+// виду (не более одного разделителя, только цифры), а запятую сервер и
+// так понимает (parse_float на бэкенде уже заменяет её на точку).
+document.querySelectorAll('.decimal-input').forEach(function(el) {
+  el.addEventListener('input', function() {
+    var before = el.value;
+    var cleaned = before.replace(/[^0-9.,]/g, '');
+    var sepIndex = cleaned.search(/[.,]/);
+    if (sepIndex !== -1) {
+      cleaned = cleaned.slice(0, sepIndex + 1) + cleaned.slice(sepIndex + 1).replace(/[.,]/g, '');
+    }
+    if (cleaned !== before) {
+      var pos = el.selectionStart - (before.length - cleaned.length);
+      el.value = cleaned;
+      try { el.setSelectionRange(Math.max(0, pos), Math.max(0, pos)); } catch (e) {}
+    }
+  });
+});
+
+function parseDecimal(str) {
+  if (str == null) { return NaN; }
+  return parseFloat(String(str).trim().replace(',', '.'));
+}
+
 function collectRangeInputs() {
   var ranges = {};
   for (var i = 0; i < RANGE_KEYS.length; i++) {
     var k = RANGE_KEYS[i];
-    var low = parseFloat(document.getElementById('range-' + k + '-low').value);
-    var high = parseFloat(document.getElementById('range-' + k + '-high').value);
+    var low = parseDecimal(document.getElementById('range-' + k + '-low').value);
+    var high = parseDecimal(document.getElementById('range-' + k + '-high').value);
     if (isNaN(low) || isNaN(high)) { return null; }
     ranges[k] = [low, high];
   }
@@ -3197,8 +3342,8 @@ async function persistSettings(payload) {
     setMsg('ranges-msg', 'Сохранено', true);
     showToast('Сохранено', true);
   } catch (err) {
-    setMsg('ranges-msg', err.message, false);
-    showToast(err.message, false);
+    setMsg('ranges-msg', friendlyErrorMessage(err), false);
+    showToast(friendlyErrorMessage(err), false);
   }
 }
 
@@ -3265,16 +3410,47 @@ function updateDateLabels() {
       document.getElementById('date_to_label').textContent = fmtDateLabel(document.getElementById('date_to').value);
     }
 
-    document.querySelectorAll('.dt').forEach(function(el) { el.value = localDateTime(); });
-    document.getElementById('date_from').value = localDate(-7);
-    document.getElementById('date_to').value = localDate(0);
-    document.getElementById('date_from').addEventListener('change', function() { updateDateLabels(); loadHistory(); });
-    document.getElementById('date_to').addEventListener('change', function() { updateDateLabels(); loadHistory(); });
-    updateDateLabels();
+    var HISTORY_FILTERS_KEY = 'medical_diary_history_filters';
 
-    document.getElementById('history_type').addEventListener('change', loadHistory);
+    function saveHistoryFilters() {
+      try {
+        localStorage.setItem(HISTORY_FILTERS_KEY, JSON.stringify({
+          date_from: document.getElementById('date_from').value,
+          date_to: document.getElementById('date_to').value,
+          type: document.getElementById('history_type').value,
+          sort: document.querySelector('input[name="history_sort"]:checked').value
+        }));
+      } catch (e) {}
+    }
+
+    function setDateRangePreset(days) {
+      document.getElementById('date_from').value = localDate(-days + 1);
+      document.getElementById('date_to').value = localDate(0);
+      updateDateLabels();
+      saveHistoryFilters();
+      loadHistory();
+    }
+
+    (function restoreHistoryFilters() {
+      var saved = null;
+      try { saved = JSON.parse(localStorage.getItem(HISTORY_FILTERS_KEY) || 'null'); } catch (e) {}
+
+      document.querySelectorAll('.dt').forEach(function(el) { el.value = localDateTime(); });
+      document.getElementById('date_from').value = (saved && saved.date_from) || localDate(-6);
+      document.getElementById('date_to').value = (saved && saved.date_to) || localDate(0);
+      if (saved && saved.type) { document.getElementById('history_type').value = saved.type; }
+      if (saved && saved.sort) {
+        var radio = document.querySelector('input[name="history_sort"][value="' + saved.sort + '"]');
+        if (radio) { radio.checked = true; }
+      }
+      updateDateLabels();
+    })();
+
+    document.getElementById('date_from').addEventListener('change', function() { updateDateLabels(); saveHistoryFilters(); loadHistory(); });
+    document.getElementById('date_to').addEventListener('change', function() { updateDateLabels(); saveHistoryFilters(); loadHistory(); });
+    document.getElementById('history_type').addEventListener('change', function() { saveHistoryFilters(); loadHistory(); });
     document.querySelectorAll('input[name="history_sort"]').forEach(function(el) {
-      el.addEventListener('change', loadHistory);
+      el.addEventListener('change', function() { saveHistoryFilters(); loadHistory(); });
     });
 
     function setMsg(id, text, ok) {
@@ -3284,12 +3460,27 @@ function updateDateLabels() {
       el.className = 'message ' + (ok ? 'ok' : 'error');
     }
 
-    async function postJSON(url, data) {
-      var res = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf },
-        body: JSON.stringify(data)
-      });
+    function friendlyErrorMessage(err) {
+      // fetch() отклоняет промис с TypeError при обрыве сети/офлайне —
+      // технический текст вроде "Failed to fetch" пользователю ничего не
+      // скажет, поэтому подменяем его на понятное сообщение.
+      if (err instanceof TypeError || (err && /fetch/i.test(err.message || ''))) {
+        return 'Нет соединения с сервером — проверьте интернет и попробуйте ещё раз.';
+      }
+      return (err && err.message) || 'Неизвестная ошибка';
+    }
+
+    async function postJSON(url, data, extraHeaders) {
+      var res;
+      try {
+        res = await fetch(url, {
+          method: 'POST',
+          headers: Object.assign({ 'Content-Type': 'application/json', 'X-CSRF-Token': csrf }, extraHeaders || {}),
+          body: JSON.stringify(data)
+        });
+      } catch (err) {
+        throw new Error(friendlyErrorMessage(err));
+      }
 
       if (res.status === 401) { window.location = '/login'; throw new Error('Требуется вход'); }
 
@@ -3300,27 +3491,38 @@ function updateDateLabels() {
       return out;
     }
 
+    function genIdemKey() {
+      if (window.crypto && window.crypto.randomUUID) { return window.crypto.randomUUID(); }
+      return 'idem-' + Date.now() + '-' + Math.random().toString(36).slice(2);
+    }
+
     document.getElementById('glucose-form').addEventListener('submit', async function(e) {
       e.preventDefault();
       var f = e.target;
+      var btn = f.querySelector('button[type="submit"]');
+      if (btn) { btn.disabled = true; }
       try {
         await postJSON('/api/glucose', {
           glucose_type: f.glucose_type.value,
           value: f.value.value,
           measured_at: f.measured_at.value.replace('T', ' '),
           comment: f.comment.value
-        });
+        }, { 'Idempotency-Key': genIdemKey() });
         setMsg('glucose-msg', '', true);
         showToast('Запись глюкозы сохранена', true);
         f.value.value = '';
         f.comment.value = '';
         loadHistory();
-      } catch (err) { setMsg('glucose-msg', err.message, false); showToast(err.message, false); }
+        loadLastEntryStatuses();
+      } catch (err) { setMsg('glucose-msg', friendlyErrorMessage(err), false); showToast(friendlyErrorMessage(err), false); }
+      finally { if (btn) { btn.disabled = false; } }
     });
 
     document.getElementById('vitals-form').addEventListener('submit', async function(e) {
       e.preventDefault();
       var f = e.target;
+      var btn = f.querySelector('button[type="submit"]');
+      if (btn) { btn.disabled = true; }
       try {
         await postJSON('/api/vitals', {
           systolic: f.systolic.value,
@@ -3328,17 +3530,21 @@ function updateDateLabels() {
           pulse: f.pulse.value,
           measured_at: f.measured_at.value.replace('T', ' '),
           comment: f.comment.value
-        });
+        }, { 'Idempotency-Key': genIdemKey() });
         setMsg('vitals-msg', '', true);
         showToast('Запись давления/пульса сохранена', true);
         f.comment.value = '';
         loadHistory();
-      } catch (err) { setMsg('vitals-msg', err.message, false); showToast(err.message, false); }
+        loadLastEntryStatuses();
+      } catch (err) { setMsg('vitals-msg', friendlyErrorMessage(err), false); showToast(friendlyErrorMessage(err), false); }
+      finally { if (btn) { btn.disabled = false; } }
     });
 
     document.getElementById('food-form').addEventListener('submit', async function(e) {
       e.preventDefault();
       var f = e.target;
+      var btn = f.querySelector('button[type="submit"]');
+      if (btn) { btn.disabled = true; }
       try {
         await postJSON('/api/food', {
           food_name: f.food_name.value,
@@ -3346,14 +3552,16 @@ function updateDateLabels() {
           amount_unit: f.amount_unit.value,
           consumed_at: f.consumed_at.value.replace('T', ' '),
           comment: f.comment.value
-        });
+        }, { 'Idempotency-Key': genIdemKey() });
         setMsg('food-msg', '', true);
         showToast('Запись о питании сохранена', true);
         f.food_name.value = '';
         f.amount_value.value = '';
         f.comment.value = '';
         loadHistory();
-      } catch (err) { setMsg('food-msg', err.message, false); showToast(err.message, false); }
+        loadLastEntryStatuses();
+      } catch (err) { setMsg('food-msg', friendlyErrorMessage(err), false); showToast(friendlyErrorMessage(err), false); }
+      finally { if (btn) { btn.disabled = false; } }
     });
 
     function historyParams() {
@@ -3616,7 +3824,7 @@ function updateDateLabels() {
         setMsg('history-msg', 'Записей: ' + out.entries.length, true);
       } catch (err) {
         tbody.innerHTML = '';
-        setMsg('history-msg', err.message, false);
+        setMsg('history-msg', friendlyErrorMessage(err), false);
       }
     }
 
@@ -3668,7 +3876,7 @@ function updateDateLabels() {
 
           tbody.appendChild(tr);
         });
-      } catch (err) { setMsg('user-msg', err.message, false); }
+      } catch (err) { setMsg('user-msg', friendlyErrorMessage(err), false); }
     }
 
     var userEditId = null;
@@ -3702,7 +3910,7 @@ function updateDateLabels() {
         if (!res.ok) { throw new Error(out.error || ('HTTP ' + res.status)); }
         setMsg('user-msg', 'Пользователь удалён', true);
         loadUsers();
-      } catch (err) { setMsg('user-msg', err.message, false); }
+      } catch (err) { setMsg('user-msg', friendlyErrorMessage(err), false); }
     }
 
     var userForm = document.getElementById('user-form');
@@ -3721,7 +3929,7 @@ function updateDateLabels() {
           f.display_name.value = '';
           f.password.value = '';
           loadUsers();
-        } catch (err) { setMsg('user-msg', err.message, false); }
+        } catch (err) { setMsg('user-msg', friendlyErrorMessage(err), false); }
       });
       loadUsers();
     }
@@ -3765,7 +3973,7 @@ function updateDateLabels() {
           tbody.appendChild(tr);
         });
       } catch (err) {
-        setMsg('backup-msg', err.message, false);
+        setMsg('backup-msg', friendlyErrorMessage(err), false);
       }
     }
 
@@ -3776,8 +3984,8 @@ function updateDateLabels() {
         showToast('Резервная копия создана', true);
         loadBackupStatus();
       } catch (err) {
-        setMsg('backup-msg', err.message, false);
-        showToast(err.message, false);
+        setMsg('backup-msg', friendlyErrorMessage(err), false);
+        showToast(friendlyErrorMessage(err), false);
       }
     }
     loadBackupStatus();
@@ -3799,7 +4007,7 @@ function updateDateLabels() {
           cancelUserEdit();
           loadUsers();
         } catch (err) {
-          setMsg('user-edit-msg', err.message, false);
+          setMsg('user-edit-msg', friendlyErrorMessage(err), false);
         }
       });
     }
@@ -3922,7 +4130,7 @@ function updateDateLabels() {
         try { localStorage.setItem('medical_diary_wa_credential_id', cred.id); } catch (e) {}
         setMsg('wa-msg', biometricName() + ' включён для этого устройства', true);
       } catch (err) {
-        setMsg('wa-msg', err.message, false);
+        setMsg('wa-msg', friendlyErrorMessage(err), false);
       }
     }
 
@@ -3932,19 +4140,24 @@ function updateDateLabels() {
         try { localStorage.removeItem('medical_diary_wa_credential_id'); } catch (e) {}
         setMsg('wa-msg', 'Вход по биометрии отключён', true);
       } catch (err) {
-        setMsg('wa-msg', err.message, false);
+        setMsg('wa-msg', friendlyErrorMessage(err), false);
       }
     }
 
     var UNIT_RU_JS = { 'g': 'г', 'ml': 'мл', 'pcs': 'шт', 'portion': 'порция' };
     var editState = { type: null, id: null };
 
-    async function sendJSON(method, url, data) {
-      var res = await fetch(url, {
-        method: method,
-        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf },
-        body: JSON.stringify(data)
-      });
+    async function sendJSON(method, url, data, extraHeaders) {
+      var res;
+      try {
+        res = await fetch(url, {
+          method: method,
+          headers: Object.assign({ 'Content-Type': 'application/json', 'X-CSRF-Token': csrf }, extraHeaders || {}),
+          body: JSON.stringify(data)
+        });
+      } catch (err) {
+        throw new Error(friendlyErrorMessage(err));
+      }
 
       if (res.status === 401) { window.location = '/login'; throw new Error('Требуется вход'); }
 
@@ -4034,8 +4247,8 @@ function updateDateLabels() {
         closeEdit();
         loadHistory();
       } catch (err) {
-        setMsg('edit-msg', err.message, false);
-        showToast(err.message, false);
+        setMsg('edit-msg', friendlyErrorMessage(err), false);
+        showToast(friendlyErrorMessage(err), false);
       }
     }
 
@@ -4052,8 +4265,8 @@ function updateDateLabels() {
         showToast('Запись удалена', true);
         loadHistory();
       } catch (err) {
-        setMsg('history-msg', err.message, false);
-        showToast(err.message, false);
+        setMsg('history-msg', friendlyErrorMessage(err), false);
+        showToast(friendlyErrorMessage(err), false);
       }
     }
 
@@ -4194,7 +4407,7 @@ function updateDateLabels() {
         await renderPdfPages(1);
         bindPinch();
       } catch (err) {
-        pages.innerHTML = '<div class="pdf-status">Ошибка просмотра: ' + err.message + '</div>';
+        pages.innerHTML = '<div class="pdf-status">Ошибка просмотра: ' + friendlyErrorMessage(err) + '</div>';
       }
     }
 
@@ -4214,7 +4427,7 @@ function updateDateLabels() {
           setTimeout(function() { URL.revokeObjectURL(a.href); }, 5000);
         }
       } catch (err) {
-        if (err && err.name !== 'AbortError') { alert('Не удалось поделиться: ' + err.message); }
+        if (err && err.name !== 'AbortError') { alert('Не удалось поделиться: ' + friendlyErrorMessage(err)); }
       }
     }
 
