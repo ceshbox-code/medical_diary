@@ -6,6 +6,10 @@ import threading
 import time
 import fcntl
 import glob
+import urllib.request
+import urllib.error
+import urllib.parse
+import uuid
 from datetime import datetime, date, timedelta
 from functools import wraps
 from io import BytesIO
@@ -121,7 +125,25 @@ app.config.update(
 app.permanent_session_lifetime = timedelta(days=int(os.getenv("SESSION_LIFETIME_DAYS", "30")))
 
 
-UNIT_RU = {"g": "г", "ml": "мл", "pcs": "шт", "portion": "порция"}
+UNIT_RU = {
+    # Старые значения, которые могли сохраниться в БД.
+    "g": "г", "gram": "г", "grams": "г",
+    "kg": "кг", "kilogram": "кг", "kilograms": "кг",
+    "mg": "мг", "milligram": "мг", "milligrams": "мг",
+    "mcg": "мкг", "µg": "мкг",
+    "ml": "мл", "milliliter": "мл", "milliliters": "мл",
+    "l": "л", "liter": "л", "liters": "л",
+    "pcs": "шт", "pc": "шт", "piece": "шт", "pieces": "шт",
+    "portion": "порция", "portions": "порция",
+    # Русские значения уже корректны — оставляем их неизменными.
+    "г": "г", "кг": "кг", "мг": "мг", "мкг": "мкг",
+    "мл": "мл", "л": "л", "шт": "шт", "порция": "порция",
+}
+
+def unit_ru(value):
+    """Возвращает безопасное русское обозначение единицы продукта."""
+    key = str(value or "").strip()
+    return UNIT_RU.get(key, key)
 
 DEFAULT_RANGES = {
     "glucose_fasting": (3.3, 5.5),
@@ -134,7 +156,7 @@ REF_RANGES = DEFAULT_RANGES  # используется как запасной 
 
 STATUS_COLORS = {"low": "#fff3c4", "ok": "#d9f2d9", "high": "#fbd9d9"}
 STATUS_ICON = {"low": "\u25bc", "ok": "", "high": "\u25b2"}  # ▼ ниже / (без иконки) норма / ▲ выше
-DEFAULT_SETTINGS = {"glucose": True, "vitals": True, "food": True, "ranges_default": True}
+DEFAULT_SETTINGS = {"glucose": True, "vitals": True, "food": True, "temperature": True, "ranges_default": True, "ai_enabled": True}
 
 
 def status_of(value, low, high):
@@ -274,12 +296,319 @@ def vitals_assessment(systolic, diastolic, pulse, ranges=None):
     return assessment, recommendation, overall
 
 
+def temperature_assessment(value_c):
+    """Справочная оценка температуры без постановки диагноза."""
+    try:
+        value = float(value_c)
+    except (TypeError, ValueError):
+        return "Значение температуры не распознано", "Проверьте измерение и единицы (°C).", "ok"
+
+    if value < 35.0:
+        return (
+            "Температура ниже ориентировочного диапазона",
+            "Повторите измерение и оцените самочувствие; при выраженной слабости или ухудшении состояния обратитесь за медицинской помощью.",
+            "low",
+        )
+    if value <= 37.0:
+        return "Температура в пределах ориентировочного диапазона", "Продолжайте наблюдение с учётом самочувствия.", "ok"
+    if value < 38.0:
+        return (
+            "Температура повышена относительно ориентировочного диапазона",
+            "Повторите измерение через некоторое время и наблюдайте за самочувствием; при сохранении повышения обратитесь к врачу.",
+            "high",
+        )
+    return (
+        "Температура высокая",
+        "Повторите измерение и оцените самочувствие; при сохранении высокой температуры или ухудшении состояния обратитесь за медицинской помощью.",
+        "high",
+    )
+
+
 def food_assessment():
     return (
         "Запись о питании",
         "Сопоставляйте время и количество с уровнем глюкозы и рекомендациями вашего врача.",
         "ok",
     )
+
+
+
+GIGACHAT_AI_ENABLED = os.getenv("GIGACHAT_AI_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+GIGACHAT_AUTH_KEY = os.getenv("GIGACHAT_AUTH_KEY", "").strip()
+# Для физлиц GigaChat 3 Ultra доступен в Freemium-режиме; при необходимости
+# модель можно заменить через GIGACHAT_MODEL без изменения кода.
+GIGACHAT_MODEL = os.getenv("GIGACHAT_MODEL", "GigaChat-3-Ultra").strip() or "GigaChat-3-Ultra"
+GIGACHAT_SCOPE = os.getenv("GIGACHAT_SCOPE", "GIGACHAT_API_PERS").strip() or "GIGACHAT_API_PERS"
+GIGACHAT_TIMEOUT_SECONDS = max(5, min(60, int(os.getenv("GIGACHAT_TIMEOUT_SECONDS", "20"))))
+GIGACHAT_MAX_ENTRIES = max(1, min(200, int(os.getenv("GIGACHAT_MAX_ENTRIES", "120"))))
+GIGACHAT_TOKEN_URL = "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"
+GIGACHAT_API_URL = "https://api.giga.chat/v1/chat/completions"
+
+_gigachat_token_lock = threading.Lock()
+_gigachat_access_token = None
+_gigachat_token_expires_at = 0.0
+
+
+def _gigachat_get_access_token():
+    """Получает и кратковременно кеширует OAuth access token GigaChat.
+
+    GIGACHAT_AUTH_KEY — authorization key из кабинета GigaChat API.
+    Сам access token действует ограниченное время, поэтому в окружении
+    хранится только ключ авторизации, а не временный токен.
+    """
+    global _gigachat_access_token, _gigachat_token_expires_at
+
+    if not GIGACHAT_AUTH_KEY:
+        return None
+
+    now = time.time()
+    if _gigachat_access_token and now < _gigachat_token_expires_at - 60:
+        return _gigachat_access_token
+
+    with _gigachat_token_lock:
+        now = time.time()
+        if _gigachat_access_token and now < _gigachat_token_expires_at - 60:
+            return _gigachat_access_token
+
+        request = urllib.request.Request(
+            GIGACHAT_TOKEN_URL,
+            data=("scope=" + urllib.parse.quote_plus(GIGACHAT_SCOPE)).encode("utf-8"),
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Accept": "application/json",
+                "RqUID": str(uuid.uuid4()),
+                "Authorization": "Basic " + GIGACHAT_AUTH_KEY,
+                "User-Agent": "MedicalDiary/1.0",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=GIGACHAT_TIMEOUT_SECONDS) as response:
+            raw = response.read(64 * 1024)
+
+        result = json.loads(raw.decode("utf-8"))
+        token = str(result.get("access_token") or "").strip()
+        if not token:
+            raise ValueError("GigaChat не вернул access_token")
+
+        try:
+            expires_at = float(result.get("expires_at"))
+        except (TypeError, ValueError):
+            expires_at = time.time() + 1500
+
+        _gigachat_access_token = token
+        _gigachat_token_expires_at = expires_at
+        return token
+
+
+def _normalize_ai_text(value, max_chars):
+    """Убирает переносы/лишние пробелы и жёстко ограничивает размер текста."""
+    text = " ".join(str(value or "").replace("\r", " ").replace("\n", " ").split())
+    return text[:max_chars].rstrip()
+
+
+def _ai_entry_context(entry, index):
+    """Возвращает только минимальные данные записи, необходимые для AI-оценки.
+
+    Персональные данные, комментарии пользователя и идентификаторы в запрос
+    GigaChat не передаются.
+    """
+    result = {
+        "index": index,
+        "type": entry.get("type"),
+        "measured_at": entry.get("measured_at"),
+    }
+
+    entry_type = entry.get("type")
+    if entry_type == "glucose":
+        result.update({
+            "glucose_type": entry.get("glucose_type"),
+            "value_mmol_l": entry.get("value_mmol_l"),
+        })
+    elif entry_type == "vitals":
+        result.update({
+            "systolic_mmhg": entry.get("systolic_mmhg"),
+            "diastolic_mmhg": entry.get("diastolic_mmhg"),
+            "pulse_bpm": entry.get("pulse_bpm"),
+        })
+    elif entry_type == "food":
+        result.update({
+            "food_name": entry.get("food_name"),
+            "amount_value": entry.get("amount_value"),
+            "amount_unit": entry.get("amount_unit"),
+        })
+    elif entry_type == "temperature":
+        result.update({
+            "temperature_c": entry.get("temperature_c"),
+        })
+
+    return result
+
+
+def _gigachat_generate_assessments(entries, ranges, enabled=True):
+    """Генерирует краткие оценки через GigaChat пакетами.
+
+    AI не получает персональные данные, комментарии пользователя или ID.
+    Ошибка любого AI-запроса не блокирует формирование PDF.
+    """
+    if not (enabled and GIGACHAT_AI_ENABLED and GIGACHAT_AUTH_KEY and entries):
+        return None
+
+    selected = entries[:GIGACHAT_MAX_ENTRIES]
+    batch_size = 25
+    generated = {}
+
+    schema = {
+        "type": "object",
+        "properties": {
+            "items": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "index": {"type": "integer"},
+                        "assessment": {"type": "string", "maxLength": 160},
+                        "recommendation": {"type": "string", "maxLength": 300},
+                    },
+                    "required": ["index", "assessment", "recommendation"],
+                    "additionalProperties": False,
+                },
+            }
+        },
+        "required": ["items"],
+        "additionalProperties": False,
+    }
+
+    system_prompt = (
+        "Ты формируешь только безопасный текст для медицинского дневника. "
+        "Не ставь диагнозы и не назначай, не отменяй и не изменяй лекарства или лечение. "
+        "Используй только переданные данные и ориентировочные диапазоны. "
+        "Не придумывай отсутствующие факты и не используй внешние источники. "
+        "Для каждой записи верни нейтральную оценку и одно безопасное наблюдательное действие. "
+        "assessment — не более 160 символов; recommendation — не более 300 символов. "
+        "Оба текста должны быть одной строкой, без переносов. "
+        "Не повторяй все исходные данные в рекомендации. "
+        "При систолическом давлении >=180 или диастолическом >=120 не смягчай рекомендацию "
+        "обратиться за медицинской помощью. "
+        "Если данных недостаточно, прямо укажи это, не делая предположений. "
+        "Ответь только JSON по заданной схеме."
+    )
+
+    try:
+        token = _gigachat_get_access_token()
+        if not token:
+            return None
+
+        for batch_start in range(0, len(selected), batch_size):
+            batch = selected[batch_start:batch_start + batch_size]
+            try:
+                context = [
+                    _ai_entry_context(e, batch_start + i)
+                    for i, e in enumerate(batch)
+                ]
+            except Exception:
+                continue
+
+            payload = {
+                "entries": context,
+                "ranges": {
+                    "glucose_fasting_mmol_l": list(ranges.get("glucose_fasting", DEFAULT_RANGES["glucose_fasting"])),
+                    "glucose_post_mmol_l": list(ranges.get("glucose_post", DEFAULT_RANGES["glucose_post"])),
+                    "systolic_mmhg": list(ranges.get("systolic", DEFAULT_RANGES["systolic"])),
+                    "diastolic_mmhg": list(ranges.get("diastolic", DEFAULT_RANGES["diastolic"])),
+                    "pulse_bpm": list(ranges.get("pulse", DEFAULT_RANGES["pulse"])),
+                    "temperature_c": [35.0, 37.0],
+                },
+            }
+
+            prompt = (
+                system_prompt
+                + "\n\nДанные:\n"
+                + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+            )
+
+            body = {
+                "model": GIGACHAT_MODEL,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": prompt},
+                ],
+                "temperature": 0.2,
+                "max_tokens": 1800,
+                "response_format": {
+                    "type": "json_schema",
+                    "schema": schema,
+                    "strict": True,
+                },
+            }
+
+            request = urllib.request.Request(
+                GIGACHAT_API_URL,
+                data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                    "Authorization": "Bearer " + token,
+                    "User-Agent": "MedicalDiary/1.0",
+                },
+                method="POST",
+            )
+
+            with urllib.request.urlopen(request, timeout=GIGACHAT_TIMEOUT_SECONDS) as response:
+                raw = response.read(512 * 1024)
+
+            result = json.loads(raw.decode("utf-8"))
+            text = result["choices"][0]["message"]["content"]
+            parsed = text if isinstance(text, dict) else json.loads(text)
+            items = parsed.get("items")
+            if not isinstance(items, list):
+                continue
+
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    index = int(item.get("index"))
+                except (TypeError, ValueError):
+                    continue
+                if index < batch_start or index >= batch_start + len(batch) or index in generated:
+                    continue
+
+                assessment = _normalize_ai_text(item.get("assessment"), 160)
+                recommendation = _normalize_ai_text(item.get("recommendation"), 300)
+                if assessment and recommendation:
+                    generated[index] = (assessment, recommendation)
+
+    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError,
+            ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
+        print(f"[gigachat] assessment generation failed: {type(exc).__name__}: {exc}", flush=True)
+
+    return generated or None
+
+
+def add_ai_assessments(entries, ranges=None, enabled=True):
+    """Накладывает формулировки GigaChat поверх детерминированной оценки."""
+    ranges = ranges or DEFAULT_RANGES
+    generated = _gigachat_generate_assessments(entries, ranges, enabled=enabled)
+    if not generated:
+        return entries, False
+
+    used = False
+    for index, pair in generated.items():
+        e = entries[index]
+
+        # Экстренная формулировка приложения не может быть заменена моделью.
+        if e.get("type") == "vitals":
+            try:
+                if int(e.get("systolic_mmhg")) >= 180 or int(e.get("diastolic_mmhg")) >= 120:
+                    continue
+            except (TypeError, ValueError):
+                pass
+
+        e["assessment"], e["recommendation"] = pair
+        e["assessment_source"] = "ai"
+        used = True
+
+    return entries, used
 
 
 def add_assessments(entries, ranges=None):
@@ -299,12 +628,17 @@ def add_assessments(entries, ranges=None):
                     e.get("pulse_bpm"),
                     ranges,
                 )
-            else:
+            elif e.get("type") == "temperature":
+                assessment, recommendation, status = temperature_assessment(e.get("temperature_c"))
+            elif e.get("type") == "food":
                 assessment, recommendation, status = food_assessment()
+            else:
+                assessment, recommendation, status = "", "", "ok"
 
             e["assessment"] = assessment
             e["recommendation"] = recommendation
             e["assessment_status"] = status
+            e["assessment_source"] = "rules"
         except Exception:
             e["assessment"] = ""
             e["recommendation"] = ""
@@ -372,6 +706,20 @@ CREATE TABLE IF NOT EXISTS food_entries (
 );
 
 CREATE INDEX IF NOT EXISTS idx_food_user_time ON food_entries(user_id, consumed_at);
+
+CREATE TABLE IF NOT EXISTS temperature_entries (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  measured_at TEXT NOT NULL,
+  temperature_c REAL NOT NULL,
+  comment TEXT,
+  source TEXT NOT NULL DEFAULT 'manual',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  deleted_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_temperature_user_time ON temperature_entries(user_id, measured_at);
 
 CREATE TABLE IF NOT EXISTS audit_log (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -554,6 +902,156 @@ def backup_database(force=False):
         try:
             fcntl.flock(lock_fd, fcntl.LOCK_UN)
         except Exception:
+            pass
+        lock_fd.close()
+
+
+def _sqlite_integrity_ok(path):
+    """Проверяет целостность SQLite-файла в режиме только для чтения."""
+    conn = None
+    try:
+        conn = sqlite3.connect(
+            f"file:{os.path.abspath(path)}?mode=ro",
+            uri=True,
+            timeout=10,
+        )
+        row = conn.execute("PRAGMA integrity_check").fetchone()
+        return bool(row and str(row[0]).lower() == "ok")
+    except (OSError, sqlite3.Error):
+        return False
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def _backup_contains_admin(path, username):
+    """Проверяет, что в копии сохранён активный текущий администратор."""
+    conn = None
+    try:
+        conn = sqlite3.connect(
+            f"file:{os.path.abspath(path)}?mode=ro",
+            uri=True,
+            timeout=10,
+        )
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT status, is_admin FROM users WHERE username = ? LIMIT 1",
+            (username,),
+        ).fetchone()
+        return bool(
+            row
+            and row["status"] == "active"
+            and int(row["is_admin"] or 0) == 1
+        )
+    except (OSError, sqlite3.Error):
+        return False
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def restore_database_from_backup(backup_path, admin_username):
+    """Безопасно восстанавливает рабочую БД из резервной копии.
+
+    Резервная копия сначала проверяется, затем разворачивается во временный
+    SQLite-файл через Backup API. Только после повторной проверки целостности
+    временный файл атомарно заменяет рабочую БД.
+    """
+    backup_real = os.path.realpath(backup_path)
+    backup_dir_real = os.path.realpath(BACKUP_DIR)
+    database_real = os.path.realpath(DATABASE)
+
+    if os.path.commonpath([backup_real, backup_dir_real]) != backup_dir_real:
+        raise ValueError("Файл резервной копии находится вне каталога резервных копий")
+    if backup_real == database_real:
+        raise ValueError("Нельзя восстановить текущий файл базы как резервную копию")
+    if not os.path.isfile(backup_real):
+        raise ValueError("Резервная копия не найдена")
+    if not _sqlite_integrity_ok(backup_real):
+        raise ValueError("Резервная копия повреждена: integrity_check не пройден")
+    if not _backup_contains_admin(backup_real, admin_username):
+        raise ValueError(
+            "В выбранной копии нет активного администратора с текущим логином. "
+            "Восстановление остановлено, чтобы не потерять доступ."
+        )
+
+    os.makedirs(os.path.dirname(os.path.abspath(DATABASE)) or ".", exist_ok=True)
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+
+    lock_path = os.path.join(BACKUP_DIR, ".backup.lock")
+    lock_fd = open(lock_path, "w")
+    tmp_path = None
+
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+
+        # Соединение текущего HTTP-запроса больше не должно держать старый файл.
+        current_db = g.pop("db", None)
+        if current_db is not None:
+            current_db.close()
+
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        emergency_path = os.path.join(
+            BACKUP_DIR,
+            f"medical_diary-pre-restore-{stamp}-{secrets.token_hex(3)}.db",
+        )
+
+        # Сначала сохраняем аварийную копию текущего состояния.
+        src = sqlite3.connect(DATABASE, timeout=30)
+        try:
+            emergency = sqlite3.connect(emergency_path)
+            try:
+                src.backup(emergency)
+            finally:
+                emergency.close()
+        finally:
+            src.close()
+
+        if not _sqlite_integrity_ok(emergency_path):
+            try:
+                os.remove(emergency_path)
+            except OSError:
+                pass
+            raise RuntimeError("Не удалось создать корректную аварийную копию текущей БД")
+
+        tmp_path = os.path.abspath(DATABASE) + f".restore-{secrets.token_hex(8)}.tmp"
+
+        src = sqlite3.connect(backup_real, timeout=30)
+        try:
+            dst = sqlite3.connect(tmp_path, timeout=30)
+            try:
+                src.backup(dst)
+            finally:
+                dst.close()
+        finally:
+            src.close()
+
+        if not _sqlite_integrity_ok(tmp_path):
+            raise RuntimeError("Временная восстановленная БД не прошла integrity_check")
+
+        # WAL/SHM от прежнего файла не должны использоваться новой БД.
+        for suffix in ("-wal", "-shm"):
+            try:
+                os.remove(DATABASE + suffix)
+            except FileNotFoundError:
+                pass
+
+        os.replace(tmp_path, DATABASE)
+        tmp_path = None
+
+        # Применяем штатную схему/миграции приложения.
+        init_db()
+
+        return emergency_path
+    finally:
+        if tmp_path:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        except OSError:
             pass
         lock_fd.close()
 
@@ -1004,11 +1502,41 @@ def api_food():
         return jsonify(error=str(e)), 400
 
 
+@app.post("/api/temperature")
+@login_required
+def api_temperature():
+    data = request.get_json(silent=True) or {}
+    idem_key = request.headers.get("Idempotency-Key") or data.get("idempotency_key")
+
+    cached = get_idempotent_response(session["user_id"], "api_temperature", idem_key)
+    if cached is not None:
+        return jsonify(cached)
+
+    try:
+        value = parse_float(data.get("value"), 0.1, 100.0, "Температура")
+        measured_at = parse_dt(data.get("measured_at"))
+        comment = str(data.get("comment") or "").strip()[:1000]
+
+        db = get_db()
+        cur = db.execute(
+            "INSERT INTO temperature_entries (user_id, measured_at, temperature_c, comment, source) VALUES (?, ?, ?, ?, ?)",
+            (session["user_id"], measured_at, value, comment, "manual"),
+        )
+        db.commit()
+
+        audit("create_temperature", "temperature_entries", cur.lastrowid)
+        result = {"ok": True, "id": cur.lastrowid}
+        store_idempotent_response(session["user_id"], "api_temperature", idem_key, "temperature_entries", cur.lastrowid, result)
+        return jsonify(result)
+    except ValueError as e:
+        return jsonify(error=str(e)), 400
+
+
 MAX_HISTORY_RANGE_DAYS = 366
 
 
 def query_entries(user_id, date_from=None, date_to=None, entry_type="all", sort="date", ranges=None):
-    if entry_type not in ("all", "glucose", "vitals", "food"):
+    if entry_type not in ("all", "glucose", "vitals", "food", "temperature"):
         raise ValueError("Некорректный тип фильтра")
     if sort not in ("date", "value"):
         raise ValueError("Некорректный порядок сортировки")
@@ -1152,8 +1680,40 @@ def query_entries(user_id, date_from=None, date_to=None, entry_type="all", sort=
                     "sort_value": float(r["amount_value"]),
                     "food_name": r["food_name"],
                     "amount_value": float(r["amount_value"]),
-                    "amount_unit": r["amount_unit"],
+                    "amount_unit": unit_ru(r["amount_unit"]),
                     "status": "ok",
+                }
+            )
+
+    if entry_type in ("all", "temperature"):
+        rows = db.execute(
+            """
+            SELECT *
+            FROM temperature_entries
+            WHERE user_id = ?
+              AND deleted_at IS NULL
+              AND date(measured_at) >= date(?)
+              AND date(measured_at) <= date(?)
+            ORDER BY measured_at DESC
+            """,
+            (user_id, d_from, d_to),
+        ).fetchall()
+
+        for r in rows:
+            val = float(r["temperature_c"])
+            entries.append(
+                {
+                    "id": r["id"],
+                    "type": "temperature",
+                    "type_label": "Температура",
+                    "measured_at": r["measured_at"],
+                    "measured_at_ru": format_dt_ru(r["measured_at"]),
+                    "display": f"{val:.1f} °C",
+                    "display_html": f"{val:.1f} °C",
+                    "display_pdf": f"{val:.1f} °C",
+                    "comment": r["comment"] or "",
+                    "sort_value": val,
+                    "temperature_c": val,
                 }
             )
 
@@ -1168,7 +1728,7 @@ def query_entries(user_id, date_from=None, date_to=None, entry_type="all", sort=
 @login_required
 def api_last_entry():
     entry_type = request.args.get("type", "")
-    if entry_type not in ("glucose", "vitals", "food"):
+    if entry_type not in ("glucose", "vitals", "food", "temperature"):
         return jsonify(error="Некорректный тип"), 400
 
     db = get_db()
@@ -1203,6 +1763,20 @@ def api_last_entry():
             measured_at=r["measured_at"],
             measured_at_ru=format_dt_ru(r["measured_at"]),
         )
+    if entry_type == "temperature":
+        r = db.execute(
+            "SELECT * FROM temperature_entries WHERE user_id = ? AND deleted_at IS NULL ORDER BY measured_at DESC LIMIT 1",
+            (session["user_id"],),
+        ).fetchone()
+        if not r:
+            return jsonify(found=False)
+        return jsonify(
+            found=True,
+            value=float(r["temperature_c"]),
+            comment=r["comment"] or "",
+            measured_at=r["measured_at"],
+            measured_at_ru=format_dt_ru(r["measured_at"]),
+        )
     r = db.execute(
         "SELECT * FROM food_entries WHERE user_id = ? AND deleted_at IS NULL ORDER BY consumed_at DESC LIMIT 1",
         (session["user_id"],),
@@ -1213,7 +1787,7 @@ def api_last_entry():
         found=True,
         food_name=r["food_name"],
         amount_value=float(r["amount_value"]),
-        amount_unit=r["amount_unit"],
+        amount_unit=unit_ru(r["amount_unit"]),
         comment=r["comment"] or "",
         measured_at=r["consumed_at"],
         measured_at_ru=format_dt_ru(r["consumed_at"]),
@@ -1264,7 +1838,7 @@ def format_dt_ru(value):
     except Exception:
         return str(value)
 
-def build_pdf(entries, d_from, d_to, sort="date", filter_label="Все записи", owner_name=""):
+def build_pdf(entries, d_from, d_to, sort="date", filter_label="Все записи", owner_name="", ai_used=False):
     buffer = BytesIO()
 
     doc = SimpleDocTemplate(
@@ -1282,14 +1856,29 @@ def build_pdf(entries, d_from, d_to, sort="date", filter_label="Все запи�
     day_style = ParagraphStyle("Day", fontName=FONT_NAME, fontSize=11, leading=14, spaceBefore=6, spaceAfter=3)
     header_style = ParagraphStyle("Header", fontName=FONT_NAME, fontSize=8, leading=10)
     cell_style = ParagraphStyle("Cell", fontName=FONT_NAME, fontSize=8, leading=10)
+    recommendation_style = ParagraphStyle(
+        "Recommendation",
+        fontName=FONT_NAME,
+        fontSize=8,
+        leading=10,
+        spaceAfter=0,
+    )
 
     elements = [
         Paragraph("Медицинский дневник", title_style),
         Paragraph(f"Период: {escape(d_from)} — {escape(d_to)}", normal_style),
         Paragraph(f"Пользователь: {escape(owner_name)}", normal_style),
         Paragraph(f"Фильтр: {escape(filter_label)}", normal_style),
-        Paragraph("Подсветка: жёлтый — ниже нормы, зелёный — норма, красный — выше нормы. Статистические нормы, не диагноз.", normal_style),
+        Paragraph(
+            "Подсветка: жёлтый — ниже нормы, зелёный — норма, красный — выше нормы. "
+            "Статистические нормы, не диагноз.",
+            normal_style,
+        ),
         Paragraph("Данные введены пользователем и не являются медицинским заключением.", normal_style),
+        Paragraph(
+            "Оценка и рекомендация: без * — сформированы ИИ GigaChat; с * — сформированы встроенной системой правил.",
+            normal_style,
+        ),
         Spacer(1, 6 * mm),
     ]
 
@@ -1309,46 +1898,79 @@ def build_pdf(entries, d_from, d_to, sort="date", filter_label="Все запи�
 
             elements.append(Paragraph(escape(format_day_ru(day)), day_style))
 
-            data = [
-                [
-                    Paragraph("Дата и время", header_style),
-                 Paragraph("Тип", header_style),
-                 Paragraph("Значение", header_style),
-                 Paragraph("Оценка и рекомендация", header_style),
-                 Paragraph("Комментарий", header_style),
-                ]
-            ]
+            # Один блок записи = две строки:
+            # 1) все исходные данные;
+            # 2) одна объединённая ячейка на всю ширину с оценкой и рекомендацией.
+            data = [[
+                Paragraph("Дата и время", header_style),
+                Paragraph("Тип", header_style),
+                Paragraph("Значение", header_style),
+                Paragraph("Комментарий", header_style),
+            ]]
 
             for e in day_entries:
-                assessment_text = e.get("assessment") or ""
-                recommendation_text = e.get("recommendation") or ""
-                assessment_html = escape(assessment_text)
-                if recommendation_text:
-                    assessment_html += "<br/>" + escape(recommendation_text)
-                data.append(
-                    [
-                        Paragraph(escape(e.get("measured_at_ru") or e["measured_at"]), cell_style),
-                        Paragraph(escape(e["type_label"]), cell_style),
-                        Paragraph(e.get("display_pdf") or escape(e["display"]), cell_style),
-                        Paragraph(assessment_html or "-", cell_style),
-                        Paragraph(escape(e.get("comment") or ""), cell_style),
-                    ]
-                )
+                assessment_text = _normalize_ai_text(e.get("assessment"), 160)
+                recommendation_text = _normalize_ai_text(e.get("recommendation"), 300)
 
-            table = Table(data, repeatRows=1, colWidths=[30 * mm, 20 * mm, 50 * mm, 52 * mm, 34 * mm])
-            table.setStyle(
-                TableStyle(
-                    [
-                        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#eeeeee")),
-                        ("GRID", (0, 0), (-1, -1), 0.25, colors.black),
-                        ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                        ("TOPPADDING", (0, 0), (-1, -1), 2),
-                        ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
-                    ]
-                )
+                is_ai = e.get("assessment_source") == "ai"
+                mark = "" if is_ai else "*"
+                if assessment_text and recommendation_text:
+                    assessment_html = (
+                        "<b>Оценка" + mark + ":</b> " + escape(assessment_text)
+                        + "<br/><b>Рекомендация" + mark + ":</b> " + escape(recommendation_text)
+                    )
+                elif assessment_text:
+                    assessment_html = "<b>Оценка" + mark + ":</b> " + escape(assessment_text)
+                elif recommendation_text:
+                    assessment_html = "<b>Рекомендация" + mark + ":</b> " + escape(recommendation_text)
+                else:
+                    assessment_html = "Оценка отсутствует."
+
+                data.append([
+                    Paragraph(escape(e.get("measured_at_ru") or e["measured_at"]), cell_style),
+                    Paragraph(escape(e["type_label"]), cell_style),
+                    Paragraph(e.get("display_pdf") or escape(e["display"]), cell_style),
+                    Paragraph(escape(e.get("comment") or "") or "-", cell_style),
+                ])
+                data.append([
+                    Paragraph(assessment_html, recommendation_style),
+                    "",
+                    "",
+                    "",
+                ])
+
+            table = Table(
+                data,
+                repeatRows=1,
+                colWidths=[36 * mm, 27 * mm, 55 * mm, 68 * mm],
             )
+            style_commands = [
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#eeeeee")),
+                ("GRID", (0, 0), (-1, -1), 0.25, colors.black),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("TOPPADDING", (0, 0), (-1, -1), 2),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+            ]
+
+            # Строки 2,4,6... являются объединёнными рекомендациями.
+            for row_index in range(2, len(data), 2):
+                style_commands.extend([
+                    ("SPAN", (0, row_index), (-1, row_index)),
+                    ("BACKGROUND", (0, row_index), (-1, row_index), colors.HexColor("#f7f7f7")),
+                    ("TOPPADDING", (0, row_index), (-1, row_index), 3),
+                    ("BOTTOMPADDING", (0, row_index), (-1, row_index), 3),
+                ])
+
+            table.setStyle(TableStyle(style_commands))
             elements.append(table)
             elements.append(Spacer(1, 4 * mm))
+
+        elements.append(
+            Paragraph(
+                "* Оценка и рекомендация сформированы встроенной системой правил, а не ИИ.",
+                normal_style,
+            )
+        )
 
     doc.build(elements)
     buffer.seek(0)
@@ -1372,10 +1994,12 @@ def export_pdf():
         return jsonify(error=str(e)), 400
 
     entries = add_assessments(entries, ranges)
+    entries, ai_used = add_ai_assessments(entries, ranges, enabled=_settings.get("ai_enabled", True))
     type_label = {
         "all": "Все записи",
         "glucose": "Только глюкоза",
         "vitals": "Только давление и пульс",
+        "temperature": "Только температура",
         "food": "Только питание",
     }.get(request.args.get("type", "all"), "Все записи")
 
@@ -1386,9 +2010,9 @@ def export_pdf():
     ).fetchone()
     owner_name = (owner["display_name"] or owner["username"]) if owner else ""
 
-    buffer = build_pdf(entries, d_from, d_to, request.args.get("sort", "date"), type_label, owner_name)
+    buffer = build_pdf(entries, d_from, d_to, request.args.get("sort", "date"), type_label, owner_name, ai_used)
 
-    audit("export_pdf", None, None, {"date_from": d_from, "date_to": d_to})
+    audit("export_pdf", None, None, {"date_from": d_from, "date_to": d_to, "ai_assessment": bool(ai_used), "ai_model": GIGACHAT_MODEL if ai_used else None})
 
     filename = f"medical_diary_{d_from}_{d_to}.pdf"
 
@@ -1451,6 +2075,61 @@ def admin_run_backup():
         return jsonify(error="Не удалось создать резервную копию — подробности в логах сервера"), 500
     audit("manual_backup", "backups", None, {"file": os.path.basename(path)})
     return jsonify(ok=True, file=os.path.basename(path))
+
+
+
+@app.post("/api/admin/backups/restore")
+@admin_required
+def admin_restore_backup():
+    data = request.get_json(silent=True) or {}
+    filename = str(data.get("filename") or "").strip()
+
+    # Принимаем только имя файла, а не произвольный путь.
+    if not filename or os.path.basename(filename) != filename:
+        return jsonify(error="Некорректное имя резервной копии"), 400
+    if not filename.startswith("medical_diary-") or not filename.endswith(".db"):
+        return jsonify(error="Некорректное имя резервной копии"), 400
+
+    backup_path = os.path.join(BACKUP_DIR, filename)
+    backup_real = os.path.realpath(backup_path)
+    backup_dir_real = os.path.realpath(BACKUP_DIR)
+    if os.path.commonpath([backup_real, backup_dir_real]) != backup_dir_real:
+        return jsonify(error="Недопустимый путь к резервной копии"), 400
+
+    db = get_db()
+    admin_row = db.execute(
+        "SELECT username FROM users WHERE id = ? AND status = 'active' AND is_admin = 1",
+        (session["user_id"],),
+    ).fetchone()
+    if not admin_row:
+        session.clear()
+        return jsonify(error="Учётная запись администратора недоступна"), 401
+
+    try:
+        emergency_path = restore_database_from_backup(
+            backup_real,
+            admin_row["username"],
+        )
+        # Аудит записываем уже в восстановленную БД, поэтому событие
+        # остаётся вместе с восстановленными данными.
+        audit(
+            "restore_database",
+            "backups",
+            None,
+            {
+                "file": filename,
+                "emergency_backup": os.path.basename(emergency_path),
+            },
+        )
+        session.clear()
+        return jsonify(
+            ok=True,
+            restored_file=filename,
+            emergency_backup=os.path.basename(emergency_path),
+            message="База восстановлена. Для гарантированного перехода всех процессов на новую БД перезапустите приложение.",
+        )
+    except (ValueError, RuntimeError, OSError, sqlite3.Error) as e:
+        return jsonify(error=str(e)), 400
 
 
 @app.get("/api/admin/users")
@@ -1690,6 +2369,57 @@ def api_food_delete(entry_id):
     return jsonify(ok=True)
 
 
+@app.patch("/api/temperature/<int:entry_id>")
+@login_required
+def api_temperature_update(entry_id):
+    data = request.get_json(silent=True) or {}
+    db = get_db()
+    row = db.execute(
+        "SELECT * FROM temperature_entries WHERE id = ? AND user_id = ? AND deleted_at IS NULL",
+        (entry_id, session["user_id"]),
+    ).fetchone()
+    if not row:
+        return jsonify(error="Запись не найдена"), 404
+
+    try:
+        value = parse_float(data.get("value", row["temperature_c"]), 0.1, 100.0, "Температура")
+        measured_at = parse_dt(data.get("measured_at") or row["measured_at"])
+        comment = str(data.get("comment") or "").strip()[:1000]
+    except ValueError as e:
+        return jsonify(error=str(e)), 400
+
+    old = {"temperature_c": row["temperature_c"], "measured_at": row["measured_at"], "comment": row["comment"]}
+    new = {"temperature_c": value, "measured_at": measured_at, "comment": comment}
+
+    db.execute(
+        "UPDATE temperature_entries SET temperature_c = ?, measured_at = ?, comment = ?, updated_at = datetime('now') WHERE id = ?",
+        (value, measured_at, comment, entry_id),
+    )
+    db.commit()
+    audit("update_temperature", "temperature_entries", entry_id, {"old": old, "new": new})
+    return jsonify(ok=True)
+
+
+@app.delete("/api/temperature/<int:entry_id>")
+@login_required
+def api_temperature_delete(entry_id):
+    db = get_db()
+    row = db.execute(
+        "SELECT * FROM temperature_entries WHERE id = ? AND user_id = ? AND deleted_at IS NULL",
+        (entry_id, session["user_id"]),
+    ).fetchone()
+    if not row:
+        return jsonify(error="Запись не найдена"), 404
+
+    db.execute(
+        "UPDATE temperature_entries SET deleted_at = datetime('now'), updated_at = datetime('now') WHERE id = ?",
+        (entry_id,),
+    )
+    db.commit()
+    audit("delete_temperature", "temperature_entries", entry_id, {"old": {"temperature_c": row["temperature_c"], "measured_at": row["measured_at"], "comment": row["comment"]}})
+    return jsonify(ok=True)
+
+
 @app.patch("/api/admin/users/<int:user_id>")
 @admin_required
 def admin_update_user(user_id):
@@ -1729,6 +2459,125 @@ def admin_update_user(user_id):
 
     audit("admin_update_user", "users", user_id, {"old": old, "new": {"username": username, "display_name": display_name, "password_changed": bool(password)}})
     return jsonify(ok=True)
+
+
+@app.get("/api/ai-status")
+@login_required
+def api_ai_status():
+    """Проверяет конфигурацию и OAuth GigaChat без передачи медицинских данных."""
+    if not GIGACHAT_AI_ENABLED:
+        return jsonify(
+            available=False, configured=bool(GIGACHAT_AUTH_KEY), enabled=False,
+            model=GIGACHAT_MODEL, code="disabled",
+            message="ИИ отключён на сервере",
+        )
+    if not GIGACHAT_AUTH_KEY:
+        return jsonify(
+            available=False, configured=False, enabled=True,
+            model=GIGACHAT_MODEL, code="missing_key",
+            message="Не задан GIGACHAT_AUTH_KEY",
+        )
+    try:
+        token = _gigachat_get_access_token()
+        if not token:
+            return jsonify(
+                available=False, configured=True, enabled=True,
+                model=GIGACHAT_MODEL, code="token_missing",
+                message="GigaChat не вернул access token",
+            )
+        return jsonify(
+            available=True, configured=True, enabled=True,
+            model=GIGACHAT_MODEL, code="ok",
+            message="GigaChat доступен",
+        )
+    except urllib.error.HTTPError as exc:
+        if exc.code == 401:
+            code, message = "auth_error", "Ошибка авторизации GigaChat: проверьте GIGACHAT_AUTH_KEY"
+        elif exc.code == 403:
+            code, message = "forbidden", "GigaChat отклонил запрос (403)"
+        elif exc.code == 429:
+            code, message = "rate_limit", "GigaChat временно ограничил частоту запросов"
+        else:
+            code, message = "http_error", f"GigaChat вернул HTTP {exc.code}"
+        print(f"[gigachat] status check failed: HTTP {exc.code}", flush=True)
+        return jsonify(
+            available=False, configured=True, enabled=True,
+            model=GIGACHAT_MODEL, code=code, message=message,
+        )
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        print(f"[gigachat] status check failed: {type(exc).__name__}: {exc}", flush=True)
+        return jsonify(
+            available=False, configured=True, enabled=True,
+            model=GIGACHAT_MODEL, code="network_error",
+            message="GigaChat недоступен по сети",
+        )
+    except Exception as exc:
+        print(f"[gigachat] status check failed: {type(exc).__name__}: {exc}", flush=True)
+        return jsonify(
+            available=False, configured=True, enabled=True,
+            model=GIGACHAT_MODEL, code="error",
+            message="Ошибка подключения к GigaChat",
+        )
+
+
+@app.post("/api/ai-test")
+@login_required
+def api_ai_test():
+    """Реальный короткий тест генерации без медицинских данных."""
+    if not GIGACHAT_AI_ENABLED:
+        return jsonify(ok=False, code="disabled", message="ИИ отключён на сервере"), 400
+    try:
+        token = _gigachat_get_access_token()
+        if not token:
+            return jsonify(ok=False, code="token_missing", message="Не удалось получить токен GigaChat"), 502
+
+        body = {
+            "model": GIGACHAT_MODEL,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "Ответь одним словом: ГОТОВО",
+                }
+            ],
+            "temperature": 0.0,
+            "max_tokens": 20,
+        }
+        req = urllib.request.Request(
+            GIGACHAT_API_URL,
+            data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "Authorization": "Bearer " + token,
+                "User-Agent": "MedicalDiary/1.0",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=GIGACHAT_TIMEOUT_SECONDS) as response:
+            result = json.loads(response.read(64 * 1024).decode("utf-8"))
+
+        answer = _normalize_ai_text(result["choices"][0]["message"]["content"], 80)
+        if not answer:
+            raise ValueError("GigaChat вернул пустой ответ")
+        return jsonify(ok=True, model=result.get("model") or GIGACHAT_MODEL, answer=answer)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 401:
+            code, message = "auth_error", "Ошибка авторизации GigaChat"
+        elif exc.code == 403:
+            code, message = "forbidden", "GigaChat отклонил запрос (403)"
+        elif exc.code == 402:
+            code, message = "payment_required", "Для этого запроса недоступен лимит GigaChat"
+        elif exc.code == 429:
+            code, message = "rate_limit", "GigaChat временно ограничил частоту запросов"
+        else:
+            code, message = "http_error", f"GigaChat вернул HTTP {exc.code}"
+        print(f"[gigachat] generation test failed: HTTP {exc.code}", flush=True)
+        return jsonify(ok=False, code=code, message=message), 502
+    except (urllib.error.URLError, TimeoutError, OSError):
+        return jsonify(ok=False, code="network_error", message="GigaChat недоступен по сети"), 502
+    except Exception as exc:
+        print(f"[gigachat] generation test failed: {type(exc).__name__}: {exc}", flush=True)
+        return jsonify(ok=False, code="error", message="Ошибка тестового запроса GigaChat"), 502
 
 
 @app.post("/api/settings")
@@ -2331,18 +3180,18 @@ html.theme-dark{--bg:#08111d;--surface:#101b2a;--surface-2:#142238;--surface-3:#
 *,:before,:after{box-sizing:border-box}html,body{min-height:100%;overflow-x:hidden}body{margin:0;background:radial-gradient(circle at 50% -10%,rgba(47,140,255,.08),transparent 35%),var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","Segoe UI",sans-serif;-webkit-text-size-adjust:100%;padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);overscroll-behavior-x:none}[hidden]{display:none!important}button,input,select,textarea{font:inherit}button{cursor:pointer}button:disabled{opacity:.55;cursor:wait}
 .app-shell{width:100%;max-width:760px;margin:0 auto;padding-bottom:100px}.topbar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:18px 18px 6px}.brand{min-width:0}.eyebrow{font-size:13px;font-weight:650;color:var(--muted);margin-bottom:3px}.brand-title{font-size:22px;line-height:1.1;font-weight:850;letter-spacing:-.5px}.link-btn{border:0;background:transparent;color:var(--primary-strong);font-size:13px;font-weight:800;padding:0}.user-pill{max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted);font-size:13px;font-weight:700}.header-action{width:42px;height:42px;border:1px solid var(--border);border-radius:14px;background:var(--surface);color:var(--text);font-size:20px;box-shadow:var(--shadow)}
 main{width:100%;padding:10px 16px 18px}.page-intro{margin:8px 2px 18px}.page-intro h1,.history-head h1{margin:0;font-size:32px;line-height:1.05;letter-spacing:-.8px}.page-intro p{margin:7px 0 0;color:var(--muted);font-size:14px}.section-label{display:flex;align-items:center;justify-content:space-between;margin:18px 2px 10px}.section-label strong{font-size:14px;letter-spacing:.2px}.section-label span{font-size:13px;color:var(--primary-strong);font-weight:750}
-.quick-list{display:grid;gap:10px}.quick-card{display:flex;align-items:center;gap:13px;width:100%;padding:13px 14px;border:1px solid var(--border);border-radius:17px;background:linear-gradient(145deg,var(--surface),var(--surface-2));color:var(--text);text-align:left;box-shadow:var(--shadow)}.quick-card:active{transform:scale(.99)}.quick-icon,.history-icon{width:48px;height:48px;display:grid;place-items:center;flex:0 0 48px;border-radius:50%;font-size:24px;color:#fff;box-shadow:inset 0 1px 1px rgba(255,255,255,.25)}.quick-icon.glucose,.history-icon.glucose{background:var(--glucose)}.quick-icon.vitals,.history-icon.vitals{background:var(--vitals)}.quick-icon.food,.history-icon.food{background:var(--food)}.quick-copy{min-width:0;flex:1}.quick-title{font-size:17px;font-weight:800}.quick-sub{margin-top:2px;font-size:13px;color:var(--muted)}.chevron{font-size:25px;color:var(--faint)}
+.quick-list{display:grid;gap:10px}.quick-card{display:grid;grid-template-columns:48px minmax(0,1fr) 22px;align-items:center;column-gap:13px;width:100%;min-height:82px;padding:14px;border:1px solid var(--border);border-radius:17px;background:linear-gradient(145deg,var(--surface),var(--surface-2));color:var(--text);text-align:left;box-shadow:var(--shadow);-webkit-appearance:none;appearance:none}.quick-card:active{transform:scale(.99)}.quick-icon,.history-icon{width:48px;height:48px;display:grid;place-items:center;flex:0 0 48px;border-radius:50%;font-size:24px;color:#fff;box-shadow:inset 0 1px 1px rgba(255,255,255,.25)}.quick-icon.glucose,.history-icon.glucose{background:var(--glucose)}.quick-icon.vitals,.history-icon.vitals{background:var(--vitals)}.quick-icon.food,.history-icon.food{background:var(--food)}.quick-icon.temperature,.history-icon.temperature{background:#e28a2f}.quick-copy{min-width:0;display:flex;flex-direction:column;justify-content:center;align-items:flex-start}.quick-title{display:block;font-size:17px;line-height:1.2;font-weight:800}.quick-sub{display:block;margin-top:6px;font-size:13px;line-height:1.2;color:var(--muted);font-weight:650}.chevron{font-size:25px;line-height:1;color:var(--faint);justify-self:end}
 .recent-list{display:grid;gap:8px}.recent-card{display:flex;align-items:center;gap:10px;padding:11px 13px;border:1px solid var(--border);border-radius:15px;background:var(--surface);box-shadow:0 4px 14px rgba(27,54,84,.05)}.recent-copy{min-width:0;flex:1}.recent-title{font-size:14px;font-weight:800}.recent-value{margin-top:2px;font-size:13px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.recent-time{font-size:11px;color:var(--muted);align-self:flex-start}.day-summary{display:grid;grid-template-columns:repeat(4,1fr);margin-top:10px;border:1px solid var(--border);border-radius:16px;background:var(--surface);overflow:hidden}.day-stat{padding:12px 6px;text-align:center;border-right:1px solid var(--border)}.day-stat:last-child{border-right:0}.day-stat .num{font-size:18px;font-weight:850}.day-stat .label{margin-top:2px;font-size:11px;color:var(--muted)}
 .card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:16px;margin-bottom:12px;box-shadow:var(--shadow);overflow:hidden}.flat{box-shadow:none}label{display:block;margin:13px 0 6px;font-size:13px;font-weight:750;color:var(--text)}input,select,textarea{display:block;width:100%;min-height:48px;border:1px solid var(--border);border-radius:13px;background:var(--surface-2);color:var(--text);padding:10px 12px;font-size:17px;outline:none}input:focus,select:focus,textarea:focus{border-color:var(--primary);box-shadow:0 0 0 3px rgba(47,140,255,.13)}textarea{min-height:82px;resize:vertical}.row{display:grid;grid-template-columns:1fr 1fr;gap:10px}.row>div{min-width:0}
-.modal{position:fixed;inset:0;z-index:80;background:rgba(4,10,18,.62);display:flex;align-items:flex-end;justify-content:center;padding:0}.modal-panel{width:100%;max-width:760px;max-height:94vh;overflow:auto;background:var(--bg);border:1px solid var(--border);border-bottom:0;border-radius:24px 24px 0 0;padding:10px 16px calc(22px + env(safe-area-inset-bottom));box-shadow:0 -18px 50px rgba(0,0,0,.28)}.modal-grabber{width:42px;height:5px;border-radius:10px;background:var(--faint);opacity:.55;margin:2px auto 13px}.modal-head{display:flex;align-items:center;gap:11px;margin-bottom:13px}.modal-title{flex:1;min-width:0}.modal-title h2{margin:0;font-size:22px;letter-spacing:-.4px}.modal-title p{margin:3px 0 0;color:var(--muted);font-size:12px}.close-btn{width:40px;height:40px;border:1px solid var(--border);border-radius:13px;background:var(--surface);color:var(--text);font-size:22px}.metric-hero{padding:17px;border:1px solid var(--border);border-radius:18px;background:linear-gradient(145deg,var(--surface),var(--surface-2));margin-bottom:12px}.metric-hero label{margin:0 0 6px}.metric-input{display:flex;align-items:baseline;gap:10px}.metric-input input{border:0;background:transparent;padding:0;min-height:64px;height:64px;font-size:56px;font-weight:850;letter-spacing:-2px;line-height:1;box-shadow:none}.metric-unit{font-size:16px;font-weight:800}.metric-status{margin-top:10px}.segmented{display:grid;grid-template-columns:1fr 1fr;gap:7px}.segmented input{position:absolute;opacity:0;pointer-events:none;width:1px;height:1px}.segmented label{display:flex;align-items:center;justify-content:center;min-height:46px;margin:0;padding:8px;border:1px solid var(--border);border-radius:13px;background:var(--surface-2);font-size:14px}.segmented input:checked+label{background:var(--primary);border-color:var(--primary);color:#fff}.field-hint{margin:5px 0 0;color:var(--muted);font-size:11px}.quick-repeat{width:100%;min-height:46px;margin-top:10px;border:1px solid var(--border);border-radius:13px;background:var(--surface-2);color:var(--primary-strong);font-weight:750}.primary-action{width:100%;min-height:52px;margin-top:12px;border:0;border-radius:14px;background:var(--primary);color:#fff;font-size:16px;font-weight:800;box-shadow:0 7px 18px rgba(47,140,255,.22)}
+.admin-action{display:flex;align-items:center;justify-content:center;width:100%;min-height:48px;margin:10px 0 12px;padding:10px 14px;border:1px solid var(--primary);border-radius:13px;background:var(--primary);color:#fff;font-size:14px;font-weight:800;box-shadow:0 6px 16px rgba(47,140,255,.18)}.admin-action:active{transform:scale(.99)}.table-wrap{width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch;border:1px solid var(--border);border-radius:14px;background:var(--surface)}#users-table,#backup-table{width:100%;border-collapse:collapse;table-layout:fixed;min-width:520px}#users-table th,#users-table td,#backup-table th,#backup-table td{padding:11px 12px;border-bottom:1px solid var(--border);text-align:left;vertical-align:middle;font-size:13px;line-height:1.25}#users-table th,#backup-table th{background:var(--surface-2);font-size:12px;font-weight:800;color:var(--muted);white-space:nowrap}#users-table tr:last-child td,#backup-table tr:last-child td{border-bottom:0}#users-table th:nth-child(1),#users-table td:nth-child(1){width:34%}#users-table th:nth-child(2),#users-table td:nth-child(2){width:42%}#users-table th:nth-child(3),#users-table td:nth-child(3){width:24%;text-align:right}.cell-actions{display:flex;justify-content:flex-end;align-items:center;gap:6px;white-space:nowrap}.cell-actions button{width:38px;height:38px;padding:0;border:1px solid var(--border);border-radius:11px;background:var(--surface-2);color:var(--text);display:inline-grid;place-items:center;font-size:16px}.cell-actions .del-btn{color:var(--danger)}#backup-table{min-width:620px}#backup-table th:nth-child(1),#backup-table td:nth-child(1){width:43%;word-break:break-word}#backup-table th:nth-child(2),#backup-table td:nth-child(2){width:22%;white-space:nowrap}#backup-table th:nth-child(3),#backup-table td:nth-child(3){width:13%;white-space:nowrap}#backup-table th:nth-child(4),#backup-table td:nth-child(4){width:22%;text-align:right;white-space:nowrap}.backup-restore-btn{min-height:38px;padding:8px 11px;border:1px solid var(--danger);border-radius:11px;background:var(--danger-soft);color:var(--danger);font-size:12px;font-weight:800}.admin-section details>summary{padding:2px 0 12px;font-weight:800}.admin-section form{margin-bottom:14px}.admin-section .table-wrap{margin-top:10px}.modal{position:fixed;inset:0;z-index:80;background:rgba(4,10,18,.62);display:flex;align-items:flex-end;justify-content:center;padding:0}.modal-panel{width:100%;max-width:760px;max-height:94vh;overflow:auto;background:var(--bg);border:1px solid var(--border);border-bottom:0;border-radius:24px 24px 0 0;padding:10px 16px calc(22px + env(safe-area-inset-bottom));box-shadow:0 -18px 50px rgba(0,0,0,.28)}.modal-grabber{width:42px;height:5px;border-radius:10px;background:var(--faint);opacity:.55;margin:2px auto 13px}.modal-head{display:flex;align-items:center;gap:11px;margin-bottom:13px}.modal-title{flex:1;min-width:0}.modal-title h2{margin:0;font-size:22px;letter-spacing:-.4px}.modal-title p{margin:3px 0 0;color:var(--muted);font-size:12px}.close-btn{width:40px;height:40px;border:1px solid var(--border);border-radius:13px;background:var(--surface);color:var(--text);font-size:22px}.metric-hero{padding:17px;border:1px solid var(--border);border-radius:18px;background:linear-gradient(145deg,var(--surface),var(--surface-2));margin-bottom:12px}.metric-hero label{margin:0 0 6px}.metric-input{display:flex;align-items:baseline;gap:10px}.metric-input input{border:0;background:transparent;padding:0;min-height:64px;height:64px;font-size:56px;font-weight:850;letter-spacing:-2px;line-height:1;box-shadow:none}.metric-unit{font-size:16px;font-weight:800}.metric-status{margin-top:10px}.segmented{display:grid;grid-template-columns:1fr 1fr;gap:7px}.segmented input{position:absolute;opacity:0;pointer-events:none;width:1px;height:1px}.segmented label{display:flex;align-items:center;justify-content:center;min-height:46px;margin:0;padding:8px;border:1px solid var(--border);border-radius:13px;background:var(--surface-2);font-size:14px}.segmented input:checked+label{background:var(--primary);border-color:var(--primary);color:#fff}.field-hint{margin:5px 0 0;color:var(--muted);font-size:11px}.quick-repeat{width:100%;min-height:46px;margin-top:10px;border:1px solid var(--border);border-radius:13px;background:var(--surface-2);color:var(--primary-strong);font-weight:750}.primary-action{width:100%;min-height:52px;margin-top:12px;border:0;border-radius:14px;background:var(--primary);color:#fff;font-size:16px;font-weight:800;box-shadow:0 7px 18px rgba(47,140,255,.22)}
 .vitals-entry{display:grid;grid-template-columns:1fr 1fr;gap:10px}.bp-field{padding:13px;border:1px solid var(--border);border-radius:16px;background:var(--surface-2)}.bp-field .bp-caption{font-size:12px;color:var(--muted);font-weight:700}.bp-field input{margin-top:4px;min-height:58px;padding:4px 0;border:0;background:transparent;font-size:40px;font-weight:850;letter-spacing:-1px;box-shadow:none}.pulse-field{margin-top:10px}
 .food-line{padding:13px;border:1px solid var(--border);border-radius:15px;background:var(--surface-2)}
-.history-head{display:flex;align-items:flex-end;justify-content:space-between;gap:10px;margin:8px 2px 15px}.history-count{margin-top:5px;color:var(--success);font-size:13px;font-weight:800}.filter-toggle{min-height:40px;padding:0 12px;border:1px solid var(--border);border-radius:12px;background:var(--surface);color:var(--text);font-weight:750}.history-filters{padding:12px}.filter-title{font-size:12px;font-weight:800;color:var(--muted);margin-bottom:8px}.date-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}.date-btn{position:relative;display:flex;align-items:center;gap:7px;min-height:43px;margin:0;padding:8px 10px;border:1px solid var(--border);border-radius:11px;background:var(--surface-2);font-size:13px;font-weight:700;overflow:hidden}.date-btn input{position:absolute;inset:0;opacity:0;min-height:0;margin:0}.date-val{color:var(--primary-strong);white-space:nowrap}.preset-row{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:8px}.preset-btn{min-height:38px;border:1px solid var(--border);border-radius:10px;background:var(--surface);color:var(--text);font-size:12px;font-weight:800}.preset-btn:first-child{background:var(--primary);border-color:var(--primary);color:#fff}.history-toolbar-row{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-top:9px}.history-select label{margin:0 0 5px}.button-group{display:grid;grid-template-columns:1fr 1fr;gap:7px}.button-group input{position:absolute;opacity:0;width:1px;height:1px}.button-group label{display:flex;align-items:center;justify-content:center;min-height:42px;margin:0;border:1px solid var(--border);border-radius:11px;background:var(--surface);font-size:12px;font-weight:750;text-align:center}.button-group input:checked+label{background:var(--primary-soft);border-color:var(--primary);color:var(--primary-strong)}.export-row{margin-top:9px}.export-row .button{margin:0}.button{display:block;width:100%;min-height:46px;border:0;border-radius:13px;background:var(--primary);color:#fff;font-size:14px;font-weight:800}.legend{margin-bottom:10px;color:var(--muted);font-size:11px;line-height:1.4}.trend-chart-wrap{padding:13px;margin:10px 0;border:1px solid var(--border);border-radius:16px;background:var(--surface-2)}.trend-chart-title{font-size:13px;font-weight:800;margin-bottom:6px}.trend-chart-wrap canvas{display:block;width:100%;height:150px}.chart-legend{margin:4px 0 0;color:var(--muted);font-size:10px}.history-cards{display:grid;gap:9px}.history-day-title{display:flex;align-items:center;gap:8px;margin:16px 0 2px;font-size:21px;font-weight:850;letter-spacing:-.4px}.day-chip{padding:4px 9px;border-radius:999px;background:var(--surface-3);color:var(--muted);font-size:11px;font-weight:750}.history-entry{position:relative;min-width:0;padding:15px 62px 15px 15px;border:1px solid var(--border);border-radius:18px;background:linear-gradient(145deg,var(--surface),var(--surface-2));box-shadow:var(--shadow);overflow:hidden}.history-entry-top{display:flex;align-items:center;gap:10px;min-width:0}.history-entry-main{min-width:0;flex:1}.history-entry-title{font-size:16px;font-weight:850;line-height:1.15}.history-entry-meta{margin-top:3px;color:var(--muted);font-size:12px;white-space:nowrap}.history-value{display:flex;align-items:baseline;gap:8px;margin:13px 0 7px;min-width:0}.history-value .number{font-size:38px;font-weight:900;letter-spacing:-1.3px}.history-value .unit{font-size:15px;font-weight:800}.status-badge{display:inline-flex;align-items:center;gap:4px;padding:5px 9px;border:1px solid;border-radius:999px;font-size:11px;font-weight:800;line-height:1.1;white-space:nowrap}.status-ok{color:var(--success);border-color:var(--success);background:var(--success-soft)}.status-low,.status-high{color:var(--danger);border-color:var(--danger);background:var(--danger-soft)}.comment-line{margin-top:9px;padding-top:8px;border-top:1px solid var(--border);color:var(--muted);font-size:12px;line-height:1.35;overflow-wrap:anywhere}.history-actions{position:absolute;top:15px;right:10px;display:flex;flex-direction:column;gap:7px}.icon-btn{width:40px;height:40px;border:1px solid var(--border);border-radius:12px;background:var(--surface-2);color:var(--text);font-size:18px;box-shadow:none}.icon-btn.delete{border-color:rgba(233,93,115,.6);color:var(--danger);background:var(--danger-soft)}.vitals-values{display:grid;grid-template-columns:minmax(0,1.25fr) 1px minmax(0,.75fr);gap:12px;align-items:center;margin-top:13px}.vitals-divider{width:1px;height:72px;background:var(--border)}.vital-label{color:var(--muted);font-size:12px;font-weight:750}.pressure-number{margin-top:3px;font-size:31px;font-weight:900;letter-spacing:-1px;white-space:nowrap}.pressure-unit,.pulse-unit{margin-top:2px;color:var(--muted);font-size:12px;font-weight:650}.vital-statuses{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:5px;margin-top:10px}.vital-status-item{min-width:0}.vital-status-item .status-badge{max-width:100%;overflow:hidden}.vital-caption{margin-top:3px;color:var(--muted);font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.edit-title{font-size:18px;font-weight:850;margin-bottom:8px}.message{margin-top:8px;font-size:13px;line-height:1.35}.ok{color:var(--success)}.error{color:var(--danger)}
-.switch-row{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:50px;margin:5px 0;font-size:14px;font-weight:700}.switch-row input{position:absolute;opacity:0;width:1px;height:1px}.switch{width:50px;height:30px;border-radius:15px;background:var(--surface-3);border:1px solid var(--border);position:relative;flex:0 0 auto}.switch:after{content:'';position:absolute;top:2px;left:2px;width:24px;height:24px;border-radius:50%;background:#fff;box-shadow:0 2px 5px rgba(0,0,0,.2);transition:left .18s}.switch-row input:checked+.switch{background:var(--primary);border-color:var(--primary)}.switch-row input:checked+.switch:after{left:22px}.settings-section{margin-top:16px;padding-top:15px;border-top:1px solid var(--border)}.settings-title{font-size:15px;font-weight:850;margin-bottom:7px}.muted{color:var(--muted);font-size:13px;line-height:1.45}.about-note{font-size:13px;line-height:1.5}.about-note h3{font-size:15px;margin:16px 0 5px}.about-note p,.about-note li{margin:6px 0}.about-note ul,.about-note ol{padding-left:20px}.range-row{display:grid;grid-template-columns:minmax(0,1fr) 70px 70px;gap:7px;align-items:center;margin:7px 0}.range-row span{font-size:12px}.range-row input{min-height:40px;padding:5px 6px;font-size:13px}.table-wrap{overflow:auto}.table-wrap table{width:100%;border-collapse:collapse;font-size:12px}.table-wrap th,.table-wrap td{border:1px solid var(--border);padding:7px;text-align:left}.history-table{display:none}
+.history-head{display:flex;align-items:flex-end;justify-content:space-between;gap:10px;margin:8px 2px 15px}.history-count{margin-top:5px;color:var(--success);font-size:13px;font-weight:800}.filter-toggle{min-height:40px;padding:0 12px;border:1px solid var(--border);border-radius:12px;background:var(--surface);color:var(--text);font-weight:750}.history-filters{padding:12px}.filter-title{font-size:12px;font-weight:800;color:var(--muted);margin-bottom:8px}.date-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}.date-btn{position:relative;display:flex;align-items:center;gap:7px;min-height:43px;margin:0;padding:8px 10px;border:1px solid var(--border);border-radius:11px;background:var(--surface-2);font-size:13px;font-weight:700;overflow:hidden}.date-btn input{position:absolute;inset:0;opacity:0;min-height:0;margin:0}.date-val{color:var(--primary-strong);white-space:nowrap}.preset-row{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:8px}.preset-btn{min-height:38px;border:1px solid var(--border);border-radius:10px;background:var(--surface);color:var(--text);font-size:12px;font-weight:800}.preset-btn:first-child{background:var(--primary);border-color:var(--primary);color:#fff}.history-toolbar-row{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-top:9px}.history-select label{margin:0 0 5px}.button-group{display:grid;grid-template-columns:1fr 1fr;gap:7px}.button-group input{position:absolute;opacity:0;width:1px;height:1px}.button-group label{display:flex;align-items:center;justify-content:center;min-height:42px;margin:0;border:1px solid var(--border);border-radius:11px;background:var(--surface);font-size:12px;font-weight:750;text-align:center}.button-group input:checked+label{background:var(--primary-soft);border-color:var(--primary);color:var(--primary-strong)}.export-row{margin-top:9px}.export-row .button{margin:0}.button{display:block;width:100%;min-height:46px;border:0;border-radius:13px;background:var(--primary);color:#fff;font-size:14px;font-weight:800}.legend{margin-bottom:10px;color:var(--muted);font-size:11px;line-height:1.4}.trend-chart-wrap{padding:13px;margin:10px 0;border:1px solid var(--border);border-radius:16px;background:var(--surface-2)}.trend-chart-title{font-size:13px;font-weight:800;margin-bottom:6px}.trend-chart-wrap canvas{display:block;width:100%;height:150px}.chart-legend{margin:4px 0 0;color:var(--muted);font-size:10px}.history-cards{display:grid;gap:7px}.history-day-title{display:flex;align-items:center;gap:7px;margin:12px 0 1px;font-size:17px;font-weight:850;letter-spacing:-.2px}.day-chip{padding:3px 8px;border-radius:999px;background:var(--surface-3);color:var(--muted);font-size:10px;font-weight:750}.history-entry{position:relative;min-width:0;padding:10px 52px 10px 11px;border:1px solid var(--border);border-radius:14px;background:linear-gradient(145deg,var(--surface),var(--surface-2));box-shadow:var(--shadow);overflow:hidden}.history-entry-top{display:flex;align-items:center;gap:8px;min-width:0}.history-entry-main{min-width:0;flex:1}.history-entry-title{font-size:14px;font-weight:850;line-height:1.15}.history-entry-meta{margin-top:2px;color:var(--muted);font-size:11px;white-space:nowrap}.history-value{display:flex;align-items:baseline;gap:7px;margin:8px 0 5px;min-width:0}.history-value .number{font-size:31px;font-weight:900;letter-spacing:-1px}.history-value .unit{font-size:13px;font-weight:800}.status-badge{display:inline-flex;align-items:center;gap:3px;padding:4px 7px;border:1px solid;border-radius:999px;font-size:10px;font-weight:800;line-height:1.1;white-space:nowrap}.status-ok{color:var(--success);border-color:var(--success);background:var(--success-soft)}.status-low,.status-high{color:var(--danger);border-color:var(--danger);background:var(--danger-soft)}.comment-line{margin-top:6px;padding-top:6px;border-top:1px solid var(--border);color:var(--muted);font-size:11px;line-height:1.3;overflow-wrap:anywhere}.history-actions{position:absolute;top:10px;right:8px;display:flex;flex-direction:column;gap:5px}.icon-btn{width:34px;height:34px;border:1px solid var(--border);border-radius:10px;background:var(--surface-2);color:var(--text);font-size:15px;box-shadow:none}.icon-btn.delete{border-color:rgba(233,93,115,.6);color:var(--danger);background:var(--danger-soft)}.vitals-values{display:grid;grid-template-columns:minmax(0,1.25fr) 1px minmax(0,.75fr);gap:9px;align-items:center;margin-top:8px}.vitals-divider{width:1px;height:58px;background:var(--border)}.vital-label{color:var(--muted);font-size:12px;font-weight:750}.pressure-number{margin-top:2px;font-size:27px;font-weight:900;letter-spacing:-.8px;white-space:nowrap}.pressure-unit,.pulse-unit{margin-top:1px;color:var(--muted);font-size:11px;font-weight:650}.vital-statuses{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:4px;margin-top:7px}.vital-status-item{min-width:0}.vital-status-item .status-badge{max-width:100%;overflow:hidden}.vital-caption{margin-top:2px;color:var(--muted);font-size:9px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.edit-title{font-size:18px;font-weight:850;margin-bottom:8px}.message{margin-top:8px;font-size:13px;line-height:1.35}.ok{color:var(--success)}.error{color:var(--danger)}
+.switch-row{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:50px;margin:5px 0;font-size:14px;font-weight:700}.switch-row input{position:absolute;opacity:0;width:1px;height:1px}.switch{width:50px;height:30px;border-radius:15px;background:var(--surface-3);border:1px solid var(--border);position:relative;flex:0 0 auto}.switch:after{content:'';position:absolute;top:2px;left:2px;width:24px;height:24px;border-radius:50%;background:#fff;box-shadow:0 2px 5px rgba(0,0,0,.2);transition:left .18s}.switch-row input:checked+.switch{background:var(--primary);border-color:var(--primary)}.switch-row input:checked+.switch:after{left:22px}.settings-section{margin-top:16px;padding-top:15px;border-top:1px solid var(--border)}.settings-title{font-size:15px;font-weight:850;margin-bottom:7px}.muted{color:var(--muted);font-size:13px;line-height:1.45}.about-note{font-size:13px;line-height:1.5}.about-note h3{font-size:15px;margin:16px 0 5px}.about-note p,.about-note li{margin:6px 0}.about-note ul,.about-note ol{padding-left:20px}.range-row{display:grid;grid-template-columns:minmax(0,1fr) 70px 70px;gap:7px;align-items:center;margin:7px 0}.range-row span{font-size:12px}.range-row input{min-height:40px;padding:5px 6px;font-size:13px}
 .tab-bar{position:fixed;left:0;right:0;bottom:0;z-index:50;display:flex;gap:8px;padding:8px 12px calc(8px + env(safe-area-inset-bottom));background:var(--surface);border-top:1px solid var(--border);box-shadow:0 -8px 25px rgba(0,0,0,.12);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px)}.tab-btn{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;min-height:56px;border:1px solid transparent;border-radius:17px;background:transparent;color:var(--muted);font-size:12px;font-weight:800}.tab-btn .tab-icon{font-size:21px;line-height:1}.tab-btn.active{background:var(--primary-soft);border-color:var(--primary);color:var(--primary-strong)}
 #toast{position:fixed;left:12px;right:12px;z-index:200;top:calc(env(safe-area-inset-top) + 9px);display:flex;justify-content:center;pointer-events:none}#toast .toast-bubble{max-width:94%;padding:10px 14px;border-radius:13px;font-size:13px;font-weight:800;color:#fff;text-align:center;opacity:0;transform:translateY(-10px);transition:.2s}.toast-bubble.show{opacity:1!important;transform:translateY(0)!important}.toast-bubble.ok{background:var(--success)}.toast-bubble.error{background:var(--danger)}
 #pdf-overlay{position:fixed;inset:0;z-index:100;background:#525659;display:flex;flex-direction:column;padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)}.pdf-toolbar{display:flex;align-items:center;gap:7px;background:#fff;padding:8px 10px}.pdf-title{flex:1;min-width:0;font-weight:700;font-size:16px}.pdf-btn{width:auto;min-height:42px;line-height:42px;margin:0;padding:0 10px;font-size:18px;border-radius:10px;background:#f0f2f5;color:#17202b}.pdf-pages{flex:1}.pdf-status{color:#fff;text-align:center;padding:24px;font-size:16px}#zoom-label{min-width:48px;text-align:center;font-weight:700;font-size:14px;color:#333}#pdf-pages{flex:1;overflow:auto;-webkit-overflow-scrolling:touch;padding:10px}#pdf-pages canvas{display:block;margin:0 auto 10px;background:#fff;border-radius:3px;box-shadow:0 1px 4px rgba(0,0,0,.4)}
-@media(min-width:700px){main{padding-left:20px;padding-right:20px}.quick-list{grid-template-columns:repeat(3,1fr)}.quick-card{min-height:100px;display:grid;grid-template-columns:auto 1fr auto;align-content:center}.history-cards{grid-template-columns:1fr 1fr}.history-day-title{grid-column:1/-1}}
+@media(min-width:520px) and (max-width:699px){.quick-list{grid-template-columns:repeat(2,minmax(0,1fr))}.quick-card{min-height:100px}}@media(min-width:700px){main{padding-left:20px;padding-right:20px}.quick-list{grid-template-columns:repeat(4,minmax(0,1fr))}.quick-card{min-height:116px;grid-template-columns:48px minmax(0,1fr) 18px;align-content:center;padding:14px}.quick-copy{align-self:center}.quick-title{font-size:16px}.quick-sub{font-size:12px}.history-cards{grid-template-columns:1fr 1fr}.history-day-title{grid-column:1/-1}}
 @media(max-width:430px){.history-toolbar-row{grid-template-columns:1fr}.date-grid{grid-template-columns:1fr 1fr}.preset-row{grid-template-columns:repeat(4,1fr)}.vitals-values{gap:8px}.pressure-number{font-size:27px}.vital-statuses{gap:4px}.status-badge{font-size:10px;padding:5px 6px}.range-row{grid-template-columns:minmax(0,1fr) 62px 62px}.day-summary{grid-template-columns:repeat(4,1fr)}}
 </style>
 </head>
@@ -2351,21 +3200,22 @@ main{width:100%;padding:10px 16px 18px}.page-intro{margin:8px 2px 18px}.page-int
 <div class="app-shell">
 <header class="topbar">
   <div class="brand"><div class="eyebrow">{{ display_name }}</div><div class="brand-title">Медицинский дневник</div></div>
-  <button type="button" class="header-action" onclick="showPage('settings')" aria-label="Настройки">⚙️</button>
+  <button type="button" id="header-logout-core" class="header-action" onclick="logout()" aria-label="Выйти" title="Выйти">↪</button>
 </header>
 <main>
 <section id="page-input" class="tab-page">
-  <div class="page-intro"><h1>Добрый вечер</h1><p id="today-label">Сегодня</p></div>
+  <div class="page-intro"><h1>Здравствуйте</h1><p id="today-label">Сегодня</p></div>
   <div class="section-label"><strong>Быстрая запись</strong><span>Нажмите, чтобы добавить</span></div>
   <div class="quick-list">
     <button type="button" class="quick-card" id="card-glucose" onclick="openEntry('glucose')"><span class="quick-icon glucose">💧</span><span class="quick-copy"><span class="quick-title">Глюкоза</span><span class="quick-sub">Добавить измерение</span></span><span class="chevron">›</span></button>
     <button type="button" class="quick-card" id="card-vitals" onclick="openEntry('vitals')"><span class="quick-icon vitals">♥</span><span class="quick-copy"><span class="quick-title">Давление и пульс</span><span class="quick-sub">Добавить измерение</span></span><span class="chevron">›</span></button>
+  <button type="button" class="quick-card" id="card-temperature" onclick="openEntry('temperature')"><span class="quick-icon temperature">🌡️</span><span class="quick-copy"><span class="quick-title">Температура</span><span class="quick-sub">Добавить измерение</span></span><span class="chevron">›</span></button>
     <button type="button" class="quick-card" id="card-food" onclick="openEntry('food')"><span class="quick-icon food">🍴</span><span class="quick-copy"><span class="quick-title">Питание</span><span class="quick-sub">Добавить запись</span></span><span class="chevron">›</span></button>
   </div>
   <div class="section-label"><strong>Последние записи</strong><button type="button" class="link-btn" onclick="showPage('history')">Все →</button></div>
   <div id="dashboard-recent" class="recent-list"><div class="muted">Загрузка…</div></div>
   <div class="section-label"><strong>Сегодня</strong></div>
-  <div id="day-summary" class="day-summary"><div class="day-stat"><div class="num" id="sum-total">—</div><div class="label">записи</div></div><div class="day-stat"><div class="num" id="sum-glucose">—</div><div class="label">глюкоза</div></div><div class="day-stat"><div class="num" id="sum-vitals">—</div><div class="label">давление</div></div><div class="day-stat"><div class="num" id="sum-food">—</div><div class="label">питание</div></div></div>
+  <div id="day-summary" class="day-summary"><div class="day-stat"><div class="num" id="sum-total">—</div><div class="label">записи</div></div><div class="day-stat"><div class="num" id="sum-glucose">—</div><div class="label">глюкоза</div></div><div class="day-stat"><div class="num" id="sum-vitals">—</div><div class="label">давление</div></div><div class="day-stat"><div class="num" id="sum-temperature">—</div><div class="label">температура</div></div><div class="day-stat"><div class="num" id="sum-food">—</div><div class="label">питание</div></div></div>
 </section>
 
 <section id="page-history" class="tab-page" hidden>
@@ -2374,23 +3224,24 @@ main{width:100%;padding:10px 16px 18px}.page-intro{margin:8px 2px 18px}.page-int
     <div class="filter-title">Период</div>
     <div class="date-grid"><span class="date-btn">📅 <span>с</span><span class="date-val" id="date_from_label"></span><input type="date" id="date_from" aria-label="Дата начала периода"></span><span class="date-btn">📅 <span>по</span><span class="date-val" id="date_to_label"></span><input type="date" id="date_to" aria-label="Дата конца периода"></span></div>
     <div class="preset-row"><button type="button" class="preset-btn" onclick="setDateRangePreset(7)">7 дней</button><button type="button" class="preset-btn" onclick="setDateRangePreset(30)">30 дней</button><button type="button" class="preset-btn" onclick="setDateRangePreset(90)">3 месяца</button><button type="button" class="preset-btn" onclick="setDateRangePreset(365)">Год</button></div>
-    <div class="history-toolbar-row"><div class="history-select"><label for="history_type">Тип записей</label><select id="history_type"><option value="all">📋 Все записи</option><option value="glucose">🩸 Только глюкоза</option><option value="vitals">♥ Только давление и пульс</option><option value="food">🍴 Только питание</option></select></div><div class="history-select"><label>Сортировка</label><div class="button-group"><input type="radio" id="hs_date" name="history_sort" value="date" checked><label for="hs_date">📅 По дате</label><input type="radio" id="hs_value" name="history_sort" value="value"><label for="hs_value">🔢 По значению</label></div></div></div>
+    <div class="history-toolbar-row"><div class="history-select"><label for="history_type">Тип записей</label><select id="history_type"><option value="all">📋 Все записи</option><option value="glucose">🩸 Только глюкоза</option><option value="vitals">♥ Только давление и пульс</option><option value="temperature">🌡️ Только температура</option><option value="food">🍴 Только питание</option></select></div><div class="history-select"><label>Сортировка</label><div class="button-group"><input type="radio" id="hs_date" name="history_sort" value="date" checked><label for="hs_date">📅 По дате</label><input type="radio" id="hs_value" name="history_sort" value="value"><label for="hs_value">🔢 По значению</label></div></div></div>
     <div class="export-row"><button type="button" class="button" id="export-btn" onclick="openPdfViewer()">📄 Выгрузить PDF</button></div>
   </div>
-  <div class="card flat"><div class="legend">● Натощак · ■ После еды · зелёный — целевой диапазон · красный — вне диапазона. Подсветка справочная и не является диагнозом.</div><div class="trend-chart-wrap" id="trend-glucose-wrap" hidden><div class="trend-chart-title">🩸 Глюкоза, ммоль/л</div><canvas id="trend-glucose"></canvas><p class="chart-legend">● натощак · ■ после еды · зелёным — целевой диапазон</p></div><div class="trend-chart-wrap" id="trend-vitals-wrap" hidden><div class="trend-chart-title">♥ Давление, мм рт. ст.</div><canvas id="trend-vitals"></canvas><p class="chart-legend">● систолическое · ■ диастолическое · зелёным — целевой диапазон</p></div><div class="message" id="history-msg"></div><div id="history-cards" class="history-cards" aria-live="polite"></div><div class="table-wrap"><table id="history-table"><thead><tr><th>Дата</th><th>Тип</th><th>Значение</th><th></th></tr></thead><tbody></tbody></table></div></div>
-  <div class="card" id="edit-card" hidden><div class="edit-title" id="edit-title">✏️ Редактирование</div><div id="edit-glucose" hidden><label>Тип измерения</label><select id="edit_glucose_type"><option value="fasting">🌅 Натощак</option><option value="post_meal">🍽️ После еды</option></select><label>Значение, ммоль/л</label><input id="edit_glucose_value" class="decimal-input" type="text" inputmode="decimal"></div><div id="edit-vitals" hidden><div class="row"><div><label>Систолическое</label><input id="edit_systolic" type="number" min="30" max="400" inputmode="numeric"></div><div><label>Диастолическое</label><input id="edit_diastolic" type="number" min="10" max="300" inputmode="numeric"></div></div><label>Пульс</label><input id="edit_pulse" type="number" min="20" max="300" inputmode="numeric"></div><div id="edit-food" hidden><label>Продукт</label><input id="edit_food_name" maxlength="150"><div class="row"><div><label>Количество</label><input id="edit_amount_value" class="decimal-input" type="text" inputmode="decimal"></div><div><label>Единица</label><select id="edit_amount_unit"><option value="г">г</option><option value="мл">мл</option><option value="шт">шт</option><option value="порция">порция</option></select></div></div></div><label>Дата и время</label><input id="edit_measured_at" type="datetime-local"><label>Комментарий</label><textarea id="edit_comment" maxlength="1000"></textarea><button type="button" class="primary-action" onclick="saveEdit()">Сохранить изменения</button><button type="button" class="quick-repeat" onclick="closeEdit()">Отмена</button><div class="message" id="edit-msg"></div></div>
+  <div class="card flat"><div class="legend">● Натощак · ■ После еды · зелёный — целевой диапазон · красный — вне диапазона. Подсветка справочная и не является диагнозом.</div><div class="trend-chart-wrap" id="trend-glucose-wrap" hidden><div class="trend-chart-title">🩸 Глюкоза, ммоль/л</div><canvas id="trend-glucose"></canvas><p class="chart-legend">● натощак · ■ после еды · зелёным — целевой диапазон</p></div><div class="trend-chart-wrap" id="trend-vitals-wrap" hidden><div class="trend-chart-title">♥ Давление, мм рт. ст.</div><canvas id="trend-vitals"></canvas><p class="chart-legend">● систолическое · ■ диастолическое · зелёным — целевой диапазон</p></div><div class="trend-chart-wrap" id="trend-temperature-wrap" hidden><div class="trend-chart-title">🌡️ Температура, °C</div><canvas id="trend-temperature"></canvas><p class="chart-legend">● температура</p></div><div class="message" id="history-msg"></div><div id="history-cards" class="history-cards" aria-live="polite"></div></div>
+  <div class="card" id="edit-card" hidden><div class="edit-title" id="edit-title">✏️ Редактирование</div><div id="edit-glucose" hidden><label>Тип измерения</label><select id="edit_glucose_type"><option value="fasting">🌅 Натощак</option><option value="post_meal">🍽️ После еды</option></select><label>Значение, ммоль/л</label><input id="edit_glucose_value" class="decimal-input" type="text" inputmode="decimal"></div><div id="edit-vitals" hidden><div class="row"><div><label>Систолическое</label><input id="edit_systolic" type="number" min="30" max="400" inputmode="numeric"></div><div><label>Диастолическое</label><input id="edit_diastolic" type="number" min="10" max="300" inputmode="numeric"></div></div><label>Пульс</label><input id="edit_pulse" type="number" min="20" max="300" inputmode="numeric"></div><div id="edit-temperature" hidden><label>Температура, °C</label><input id="edit_temperature_value" class="decimal-input" type="text" inputmode="decimal"></div><div id="edit-food" hidden><label>Продукт</label><input id="edit_food_name" maxlength="150"><div class="row"><div><label>Количество</label><input id="edit_amount_value" class="decimal-input" type="text" inputmode="decimal"></div><div><label>Единица</label><select id="edit_amount_unit"><option value="г">г</option><option value="мл">мл</option><option value="шт">шт</option><option value="порция">порция</option></select></div></div></div><label>Дата и время</label><input id="edit_measured_at" type="datetime-local"><label>Комментарий</label><textarea id="edit_comment" maxlength="1000"></textarea><button type="button" class="primary-action" onclick="saveEdit()">Сохранить изменения</button><button type="button" class="quick-repeat" onclick="closeEdit()">Отмена</button><div class="message" id="edit-msg"></div></div>
 </section>
     <section id="page-settings" class="tab-page" hidden>
       <div class="page-intro"><div><h1>Ещё</h1><p>Настройки, помощь и управление данными.</p></div></div>
       <div class="card"><details><summary>ℹ️ О программе и помощь</summary><div class="about-note">
-        <p><strong>Медицинский дневник</strong> — сервис для хранения и наблюдения показателей: глюкоза, давление, пульс и питание.</p><p><strong>Важно:</strong> приложение не ставит диагнозы и не назначает лечение. Автоматические оценки — справочные.</p>
+        <p><strong>Медицинский дневник</strong> — сервис для хранения и наблюдения показателей: глюкоза, давление, пульс, температура и питание.</p><p><strong>Важно:</strong> приложение не ставит диагнозы и не назначает лечение. Автоматические оценки — справочные.</p>
         <h3>Как пользоваться</h3><ol><li>Войдите в приложение.</li><li>Добавьте измерение.</li><li>Проверьте записи в «Истории».</li><li>При необходимости редактируйте или удалите запись.</li><li>Выгрузите PDF для врача.</li></ol>
-        <h3>Как вводить данные</h3><ul><li>Глюкоза: выберите тип — натощак или после еды, укажите значение в ммоль/л.</li><li>Давление: укажите систолическое и диастолическое значение, пульс — при наличии.</li><li>Питание: продукт, количество и единицу измерения.</li><li>В комментарии полезно указывать самочувствие, еду, нагрузку и другие факторы.</li></ul>
+        <h3>Как вводить данные</h3><ul><li>Глюкоза: выберите тип — натощак или после еды, укажите значение в ммоль/л.</li><li>Давление: укажите систолическое и диастолическое значение, пульс — при наличии.</li><li>Температура: укажите значение в °C.</li><li>Питание: продукт, количество и единицу измерения.</li><li>В комментарии полезно указывать самочувствие, еду, нагрузку и другие факторы.</li></ul>
         <h3>Безопасность</h3><ul><li>Не сообщайте пароль другим людям.</li><li>На чужом устройстве выходите из приложения.</li><li>Регулярно сохраняйте PDF и резервные копии базы данных.</li></ul>
       </div></details></div>
       <div class="card"><details><summary>⚙️ Настройки</summary>
         <div class="settings-section"><div class="settings-title">Оформление</div><label class="switch-row"><span>🌙 Тёмная тема</span><input type="checkbox" id="theme-toggle" onchange="onThemeToggleChange(this)"><span class="switch"></span></label></div>
-        <div class="settings-section"><div class="settings-title">Блоки на главной странице</div><label class="switch-row"><span>🩸 Глюкоза</span><input type="checkbox" id="set-glucose" checked><span class="switch"></span></label><label class="switch-row"><span>💓 Давление и пульс</span><input type="checkbox" id="set-vitals" checked><span class="switch"></span></label><label class="switch-row"><span>🥗 Питание</span><input type="checkbox" id="set-food" checked><span class="switch"></span></label><div class="message" id="settings-msg"></div></div>
+        <div class="settings-section"><div class="settings-title">🤖 ИИ-оценка</div><label class="switch-row"><span>Использовать ИИ в оценках PDF</span><input type="checkbox" id="set-ai-enabled" checked><span class="switch"></span></label><p class="muted" id="ai-status">Проверка доступности…</p><button type="button" class="quick-repeat" onclick="testAi()">🔎 Проверить работу ИИ</button><div class="message" id="ai-msg"></div></div>
+        <div class="settings-section"><div class="settings-title">Блоки на главной странице</div><label class="switch-row"><span>🩸 Глюкоза</span><input type="checkbox" id="set-glucose" checked><span class="switch"></span></label><label class="switch-row"><span>💓 Давление и пульс</span><input type="checkbox" id="set-vitals" checked><span class="switch"></span></label><label class="switch-row"><span>🌡️ Температура</span><input type="checkbox" id="set-temperature" checked><span class="switch"></span></label><label class="switch-row"><span>🥗 Питание</span><input type="checkbox" id="set-food" checked><span class="switch"></span></label><div class="message" id="settings-msg"></div></div>
         <div class="settings-section"><div class="settings-title" id="wa-summary">🔐 Биометрия</div><p class="muted" id="wa-hint">Быстрый вход по биометрии этого устройства, без пароля.</p><label class="switch-row"><span id="wa-toggle-label">Вход по биометрии</span><input type="checkbox" id="wa-toggle" onchange="onWaToggleChange(this)"><span class="switch"></span></label><p class="muted" id="wa-availability"></p><div class="message" id="wa-msg"></div></div>
         <div class="settings-section"><div class="settings-title">Персональные диапазоны нормы</div><p class="muted">Используются только для справочной подсветки. Если врач указал другие целевые значения, впишите их здесь.</p><label class="switch-row"><span>Использовать значения по умолчанию</span><input type="checkbox" id="ranges-default-toggle" onchange="onRangesDefaultToggleChange(this)"><span class="switch"></span></label><div id="range-inputs">
           <div class="range-row"><span>Глюкоза натощак, ммоль/л</span><input class="decimal-input" type="text" inputmode="decimal" id="range-glucose_fasting-low" oninput="scheduleSaveRanges()"><input class="decimal-input" type="text" inputmode="decimal" id="range-glucose_fasting-high" oninput="scheduleSaveRanges()"></div>
@@ -2402,29 +3253,102 @@ main{width:100%;padding:10px 16px 18px}.page-intro{margin:8px 2px 18px}.page-int
       </details></div>
 
       {% if is_admin %}
-      <div class="card"><details><summary>👥 Пользователи</summary><form id="user-form"><label>Логин</label><input name="username" maxlength="64" autocomplete="off" required><label>Отображаемое имя</label><input name="display_name" maxlength="100" required><label>Пароль</label><input name="password" type="password" minlength="8" autocomplete="new-password" required><button type="submit">Добавить пользователя</button><div class="message" id="user-msg"></div></form><form id="user-edit-form" hidden><div class="edit-title" id="user-edit-title">✏️ Редактирование пользователя</div><label>Логин</label><input name="username" maxlength="64" autocomplete="off" required><label>Отображаемое имя</label><input name="display_name" maxlength="100" required><label>Новый пароль</label><input name="password" type="password" minlength="8" autocomplete="new-password"><button type="submit">Сохранить</button><button type="button" class="secondary" onclick="cancelUserEdit()">Отмена</button><div class="message" id="user-edit-msg"></div></form><div class="table-wrap"><table id="users-table"><thead><tr><th>Имя</th><th>Логин</th><th></th></tr></thead><tbody></tbody></table></div></details></div>
-      <div class="card"><details><summary>🗄️ Резервные копии БД</summary><p class="muted" id="backup-status">Загрузка статуса…</p><button type="button" class="button" onclick="runBackupNow()">Снять копию сейчас</button><div class="message" id="backup-msg"></div><div class="table-wrap"><table id="backup-table"><thead><tr><th>Файл</th><th>Создан</th><th>Размер</th></tr></thead><tbody></tbody></table></div></details></div>
+      <div class="card admin-section"><details><summary>👥 Пользователи</summary><form id="user-form"><label>Логин</label><input name="username" maxlength="64" autocomplete="off" required><label>Отображаемое имя</label><input name="display_name" maxlength="100" required><label>Пароль</label><input name="password" type="password" minlength="8" autocomplete="new-password" required><button type="submit" class="admin-action">Добавить пользователя</button><div class="message" id="user-msg"></div></form><form id="user-edit-form" hidden><div class="edit-title" id="user-edit-title">✏️ Редактирование пользователя</div><label>Логин</label><input name="username" maxlength="64" autocomplete="off" required><label>Отображаемое имя</label><input name="display_name" maxlength="100" required><label>Новый пароль</label><input name="password" type="password" minlength="8" autocomplete="new-password"><button type="submit">Сохранить</button><button type="button" class="secondary" onclick="cancelUserEdit()">Отмена</button><div class="message" id="user-edit-msg"></div></form><div class="table-wrap"><table id="users-table"><thead><tr><th>Имя</th><th>Логин</th><th></th></tr></thead><tbody></tbody></table></div></details></div>
+      <div class="card admin-section"><details><summary>🗄️ Резервные копии БД</summary><p class="muted" id="backup-status">Загрузка статуса…</p><button type="button" class="admin-action" onclick="runBackupNow()">Снять копию сейчас</button><div class="message" id="backup-msg"></div><div class="table-wrap"><table id="backup-table"><thead><tr><th>Файл</th><th>Создан</th><th>Размер</th><th>Действие</th></tr></thead><tbody></tbody></table></div></details></div>
       {% endif %}
     </section>
 </main></div>
 <nav class="tab-bar" aria-label="Основная навигация"><button type="button" class="tab-btn" id="tab-btn-input" onclick="showPage('input')"><span class="tab-icon">📝</span><span>Ввод</span></button><button type="button" class="tab-btn" id="tab-btn-history" onclick="showPage('history')"><span class="tab-icon">▥</span><span>История</span></button><button type="button" class="tab-btn" id="tab-btn-settings" onclick="showPage('settings')"><span class="tab-icon">⚙️</span><span>Ещё</span></button></nav>
-<div id="entry-modal" class="modal" hidden><div class="modal-panel"><div class="modal-grabber"></div><div class="modal-head"><div id="modal-icon" class="quick-icon glucose">💧</div><div class="modal-title"><h2 id="modal-title">Глюкоза</h2><p id="modal-subtitle">Ввод показателя</p></div><button type="button" class="close-btn" onclick="closeEntry()">×</button></div>
+<div id="entry-modal" class="modal" hidden><div class="modal-panel"><div class="modal-grabber"></div><div class="modal-head"><div id="modal-icon" class="quick-icon glucose">💧</div><div class="modal-title"><h2 id="modal-title">Глюкоза</h2><p id="modal-subtitle">Ввод показателя</p></div><button type="button" id="modal-close-core" class="close-btn" onclick="closeEntry()">×</button></div>
 <form id="glucose-form" hidden><div class="metric-hero"><label>Значение, ммоль/л</label><div class="metric-input"><input name="value" class="decimal-input" type="text" inputmode="decimal" pattern="[0-9]+([.,][0-9]+)?" required><span class="metric-unit">ммоль/л</span></div><div class="metric-status"><p class="field-hint" id="hint-glucose"></p></div></div><label>Контекст измерения</label><div class="segmented"><input type="radio" id="gt_fasting" name="glucose_type" value="fasting" checked><label for="gt_fasting">🌅 Натощак</label><input type="radio" id="gt_postmeal" name="glucose_type" value="post_meal"><label for="gt_postmeal">🍽️ После еды</label></div><label>Дата и время</label><input name="measured_at" type="datetime-local" class="dt"><label>Комментарий <span class="muted">(необязательно)</span></label><textarea name="comment" maxlength="1000" placeholder="Например: хорошее самочувствие"></textarea><button type="button" class="quick-repeat" onclick="repeatLast('glucose', event)">↻ Повторить последнее</button><p class="last-entry-status muted" id="last-status-glucose"></p><button type="submit" class="primary-action">Сохранить измерение</button><div class="message" id="glucose-msg"></div></form>
 <form id="vitals-form" hidden><div class="vitals-entry"><div class="bp-field"><div class="bp-caption">Систолическое · мм рт. ст.</div><input name="systolic" type="number" min="30" max="400" inputmode="numeric" required><p class="field-hint" id="hint-systolic"></p></div><div class="bp-field"><div class="bp-caption">Диастолическое · мм рт. ст.</div><input name="diastolic" type="number" min="10" max="300" inputmode="numeric" required><p class="field-hint" id="hint-diastolic"></p></div></div><div class="bp-field pulse-field"><div class="bp-caption">Пульс · уд/мин</div><input name="pulse" type="number" min="20" max="300" inputmode="numeric"><p class="field-hint" id="hint-pulse"></p></div><label>Дата и время</label><input name="measured_at" type="datetime-local" class="dt"><label>Комментарий <span class="muted">(необязательно)</span></label><textarea name="comment" maxlength="1000" placeholder="Например: после прогулки"></textarea><button type="button" class="quick-repeat" onclick="repeatLast('vitals', event)">↻ Повторить последнее</button><p class="last-entry-status muted" id="last-status-vitals"></p><button type="submit" class="primary-action">Сохранить измерение</button><div class="message" id="vitals-msg"></div></form>
+<form id="temperature-form" hidden><div class="metric-hero temperature-hero"><label>Температура, °C</label><div class="metric-input"><input name="value" class="decimal-input" type="text" inputmode="decimal" pattern="[0-9]+([.,][0-9]+)?" required><span class="metric-unit">°C</span></div></div><label>Дата и время</label><input name="measured_at" type="datetime-local" class="dt"><label>Комментарий <span class="muted">(необязательно)</span></label><textarea name="comment" maxlength="1000" placeholder="Например: после пробуждения"></textarea><button type="button" class="quick-repeat" onclick="repeatLast('temperature', event)">↻ Повторить последнее</button><p class="last-entry-status muted" id="last-status-temperature"></p><button type="submit" class="primary-action">Сохранить измерение</button><div class="message" id="temperature-msg"></div></form>
 <form id="food-form" hidden><div class="food-line"><label style="margin-top:0">Продукт</label><input name="food_name" maxlength="150" required placeholder="Например: овсяная каша"><div class="row"><div><label>Количество</label><input name="amount_value" class="decimal-input" type="text" inputmode="decimal" required></div><div><label>Единица</label><select name="amount_unit"><option value="г">г</option><option value="мл">мл</option><option value="шт">шт</option><option value="порция">порция</option></select></div></div></div><label>Дата и время</label><input name="consumed_at" type="datetime-local" class="dt"><label>Комментарий <span class="muted">(необязательно)</span></label><textarea name="comment" maxlength="1000"></textarea><button type="button" class="quick-repeat" onclick="repeatLast('food', event)">↻ Повторить последнее</button><p class="last-entry-status muted" id="last-status-food"></p><button type="submit" class="primary-action">Сохранить запись</button><div class="message" id="food-msg"></div></form>
 </div></div>
-<div id="pdf-overlay" hidden><div class="pdf-toolbar"><button type="button" class="pdf-btn" onclick="zoomPdf(-1)">➖</button><span id="zoom-label">100%</span><button type="button" class="pdf-btn" onclick="zoomPdf(1)">➕</button><span class="pdf-title">📄 Медицинский дневник</span><button type="button" class="pdf-btn" onclick="sharePdf()">📤</button><button type="button" class="pdf-btn" onclick="closePdfViewer()">❌</button></div><div id="pdf-pages"></div></div>
-<script src="/pdf.min.js"></script>
+<div id="pdf-overlay" hidden><div class="pdf-toolbar"><button type="button" class="pdf-btn" onclick="zoomPdf(-1)">➖</button><span id="zoom-label">100%</span><button type="button" class="pdf-btn" onclick="zoomPdf(1)">➕</button><span class="pdf-title">📄 Медицинский дневник</span><button type="button" class="pdf-btn" onclick="downloadPdf()">⬇️</button><button type="button" class="pdf-btn" onclick="sharePdf()">📤</button><button type="button" class="pdf-btn" onclick="closePdfViewer()">❌</button></div><div id="pdf-pages"></div></div>
+<script>
+(function () {
+  // Минимальный аварийный слой интерфейса. Он не зависит от остального JS-бандла:
+  // если дополнительный код упадёт, основные кнопки всё равно должны работать.
+  function nowLocalDateTime() {
+    var d = new Date();
+    function p(n) { return String(n).padStart(2, '0'); }
+    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + 'T' + p(d.getHours()) + ':' + p(d.getMinutes());
+  }
+  function fallbackOpen(type) {
+    var modal = document.getElementById('entry-modal');
+    if (!modal) return;
+    ['glucose','vitals','temperature','food'].forEach(function(k) {
+      var f = document.getElementById(k + '-form');
+      if (f) f.hidden = (k !== type);
+    });
+    var cfg = {
+      glucose:['Глюкоза','Ввод показателя','💧','glucose'],
+      vitals:['Давление и пульс','Ввод показателей','♥','vitals'],
+      temperature:['Температура','Ввод показателя','🌡️','temperature'],
+      food:['Питание','Новая запись','🍴','food']
+    }[type];
+    if (!cfg) return;
+    var title=document.getElementById('modal-title'); if(title) title.textContent=cfg[0];
+    var subtitle=document.getElementById('modal-subtitle'); if(subtitle) subtitle.textContent=cfg[1];
+    var icon=document.getElementById('modal-icon'); if(icon){icon.textContent=cfg[2];icon.className='quick-icon '+cfg[3];}
+    modal.hidden=false;
+    document.body.style.overflow='hidden';
+    var form=document.getElementById(type+'-form');
+    if(form){var dt=form.querySelector('.dt');if(dt)dt.value=nowLocalDateTime();}
+  }
+  function fallbackPage(name) {
+    ['input','history','settings'].forEach(function(p){
+      var page=document.getElementById('page-'+p); if(page) page.hidden=(p!==name);
+      var btn=document.getElementById('tab-btn-'+p); if(btn) btn.classList.toggle('active',p===name);
+    });
+  }
+  function callOrFallback(fn, args, fallback) {
+    try {
+      if (typeof window[fn] === 'function') { window[fn].apply(window,args||[]); }
+      else { fallback.apply(window,args||[]); }
+    } catch (e) { fallback.apply(window,args||[]); }
+  }
+  function bind(id, handler) {
+    var el=document.getElementById(id);
+    if(!el || el.__coreBound) return;
+    el.__coreBound=true;
+    el.addEventListener('click', function(e){
+      try {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        handler(e);
+      } catch (_) {}
+    }, true);
+  }
+  bind('card-glucose', function(e){ callOrFallback('openEntry',['glucose'],fallbackOpen); });
+  bind('card-vitals', function(e){ callOrFallback('openEntry',['vitals'],fallbackOpen); });
+  bind('card-temperature', function(e){ callOrFallback('openEntry',['temperature'],fallbackOpen); });
+  bind('card-food', function(e){ callOrFallback('openEntry',['food'],fallbackOpen); });
+  bind('tab-btn-input', function(e){ callOrFallback('showPage',['input'],fallbackPage); });
+  bind('tab-btn-history', function(e){ callOrFallback('showPage',['history'],fallbackPage); });
+  bind('tab-btn-settings', function(e){ callOrFallback('showPage',['settings'],fallbackPage); });
+  bind('modal-close-core', function(e){ var m=document.getElementById('entry-modal');if(m){m.hidden=true;document.body.style.overflow='';} });
+  bind('header-logout-core', function(e){
+    try {
+      if (typeof window.logout === 'function') { window.logout(); return; }
+      var meta=document.querySelector('meta[name=csrf-token]');
+      var token=meta ? meta.content : '';
+      fetch('/logout',{method:'POST',headers:{'X-CSRF-Token':token}}).finally(function(){window.location='/login';});
+    } catch (_) { window.location='/login'; }
+  });
+})();
+</script>
 <script>
 
 function openEntry(type){
   var modal=document.getElementById('entry-modal'); if(!modal)return;
-  ['glucose','vitals','food'].forEach(function(k){var f=document.getElementById(k+'-form'); if(f)f.hidden=(k!==type);});
-  var cfg={glucose:['Глюкоза','Ввод показателя','💧','glucose'],vitals:['Давление и пульс','Ввод показателей','♥','vitals'],food:['Питание','Новая запись','🍴','food']}[type];
+  ['glucose','vitals','temperature','food'].forEach(function(k){var f=document.getElementById(k+'-form'); if(f)f.hidden=(k!==type);});
+  var cfg={glucose:['Глюкоза','Ввод показателя','💧','glucose'],vitals:['Давление и пульс','Ввод показателей','♥','vitals'],temperature:['Температура','Ввод показателя','🌡️','temperature'],food:['Питание','Новая запись','🍴','food']}[type];
   document.getElementById('modal-title').textContent=cfg[0]; document.getElementById('modal-subtitle').textContent=cfg[1];
   var icon=document.getElementById('modal-icon'); icon.textContent=cfg[2]; icon.className='quick-icon '+cfg[3];
   modal.hidden=false; document.body.style.overflow='hidden';
-  var form=document.getElementById(type+'-form'); if(form){var dt=form.querySelector('.dt');if(dt&&!dt.value)dt.value=localDateTime();}
+  var form=document.getElementById(type+'-form'); if(form){var dt=form.querySelector('.dt');if(dt)dt.value=localDateTime();}
   loadOneLastStatus(type);
 }
 function closeEntry(){var m=document.getElementById('entry-modal');if(m)m.hidden=true;document.body.style.overflow='';}
@@ -2434,40 +3358,43 @@ document.getElementById('today-label').textContent='Сегодня, '+todayHuman
 function loadDashboard(){
   var box=document.getElementById('dashboard-recent'); if(!box)return;
   fetch('/api/history?date_from='+encodeURIComponent(localDate(-6))+'&date_to='+encodeURIComponent(localDate(0))+'&type=all&sort=date').then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.json();}).then(function(out){
-    var entries=out.entries||[]; box.innerHTML=''; entries.slice(0,3).forEach(function(e){var c=document.createElement('div');c.className='recent-card';var icon=document.createElement('div');icon.className='history-icon '+e.type;icon.textContent=e.type==='glucose'?'💧':e.type==='vitals'?'♥':'🍴';c.appendChild(icon);var copy=document.createElement('div');copy.className='recent-copy';var t=document.createElement('div');t.className='recent-title';t.textContent=e.type==='glucose'?'Глюкоза':e.type==='vitals'?'Давление и пульс':'Питание';copy.appendChild(t);var v=document.createElement('div');v.className='recent-value';if(e.type==='glucose')v.textContent=Number(e.value_mmol_l).toFixed(1)+' ммоль/л · '+(e.glucose_type==='fasting'?'натощак':'после еды');else if(e.type==='vitals')v.textContent=e.systolic_mmhg+' / '+e.diastolic_mmhg+' мм рт. ст. · пульс '+(e.pulse_bpm==null?'—':e.pulse_bpm);else v.textContent=e.food_name+' · '+e.amount_value+' '+e.amount_unit;copy.appendChild(v);c.appendChild(copy);var tm=document.createElement('div');tm.className='recent-time';tm.textContent=(e.measured_at||'').substring(11,16);c.appendChild(tm);box.appendChild(c);});if(!entries.length)box.innerHTML='<div class="muted">Пока нет записей</div>';
-    var today=localDate(0), counts={glucose:0,vitals:0,food:0}; entries.forEach(function(e){if((e.measured_at||'').substring(0,10)===today)counts[e.type]++;}); document.getElementById('sum-glucose').textContent=counts.glucose;document.getElementById('sum-vitals').textContent=counts.vitals;document.getElementById('sum-food').textContent=counts.food;document.getElementById('sum-total').textContent=counts.glucose+counts.vitals+counts.food;
+    var entries=out.entries||[]; box.innerHTML=''; entries.slice(0,3).forEach(function(e){var c=document.createElement('div');c.className='recent-card';var icon=document.createElement('div');icon.className='history-icon '+e.type;icon.textContent=e.type==='glucose'?'💧':e.type==='vitals'?'♥':e.type==='temperature'?'🌡️':'🍴';c.appendChild(icon);var copy=document.createElement('div');copy.className='recent-copy';var t=document.createElement('div');t.className='recent-title';t.textContent=e.type==='glucose'?'Глюкоза':e.type==='vitals'?'Давление и пульс':e.type==='temperature'?'Температура':'Питание';copy.appendChild(t);var v=document.createElement('div');v.className='recent-value';if(e.type==='glucose')v.textContent=Number(e.value_mmol_l).toFixed(1)+' ммоль/л · '+(e.glucose_type==='fasting'?'натощак':'после еды');else if(e.type==='vitals')v.textContent=e.systolic_mmhg+' / '+e.diastolic_mmhg+' мм рт. ст. · пульс '+(e.pulse_bpm==null?'—':e.pulse_bpm);else if(e.type==='temperature')v.textContent=Number(e.temperature_c).toFixed(1)+' °C';else v.textContent=e.food_name+' · '+e.amount_value+' '+unitRu(e.amount_unit);copy.appendChild(v);c.appendChild(copy);var tm=document.createElement('div');tm.className='recent-time';tm.textContent=(e.measured_at||'').substring(11,16);c.appendChild(tm);box.appendChild(c);});if(!entries.length)box.innerHTML='<div class="muted">Пока нет записей</div>';
+    var today=localDate(0), counts={glucose:0,vitals:0,temperature:0,food:0}; entries.forEach(function(e){if((e.measured_at||'').substring(0,10)===today)counts[e.type]++;}); document.getElementById('sum-glucose').textContent=counts.glucose;document.getElementById('sum-vitals').textContent=counts.vitals;document.getElementById('sum-temperature').textContent=counts.temperature;document.getElementById('sum-food').textContent=counts.food;document.getElementById('sum-total').textContent=counts.glucose+counts.vitals+counts.temperature+counts.food;
   }).catch(function(){box.innerHTML='<div class="muted">Не удалось загрузить последние записи</div>';});
 }
 loadDashboard();
     var csrf = document.querySelector('meta[name="csrf-token"]').content;
-    var IS_ADMIN = {{ is_admin }};
+    var IS_ADMIN = {{ is_admin | tojson }};
     var USER_ID = {{ user_id }};
 var USER_SETTINGS = {{ settings_json | safe }};
 var RANGES = {{ ranges_json | safe }};
 var DEFAULT_RANGES_JS = {{ default_ranges_json | safe }};
 
 function applySettings(s) {
-  var map = { glucose: 'card-glucose', vitals: 'card-vitals', food: 'card-food' };
+  var map = { glucose: 'card-glucose', vitals: 'card-vitals', temperature: 'card-temperature', food: 'card-food' };
   for (var k in map) {
     var el = document.getElementById(map[k]);
     if (el) { el.style.display = s[k] ? '' : 'none'; }
   }
   var cg = document.getElementById('set-glucose'); if (cg) { cg.checked = !!s.glucose; }
   var cv = document.getElementById('set-vitals'); if (cv) { cv.checked = !!s.vitals; }
+  var ct = document.getElementById('set-temperature'); if (ct) { ct.checked = !!s.temperature; }
   var cf = document.getElementById('set-food'); if (cf) { cf.checked = !!s.food; }
+  var cai = document.getElementById('set-ai-enabled'); if (cai) { cai.checked = s.ai_enabled !== false; }
 }
 
 function bindSettings() {
-  ['glucose', 'vitals', 'food'].forEach(function(k) {
+  ['glucose', 'vitals', 'temperature', 'food', 'ai_enabled'].forEach(function(k) {
     var el = document.getElementById('set-' + k);
     if (!el) { return; }
     el.addEventListener('change', function() {
       USER_SETTINGS[k] = el.checked;
       applySettings(USER_SETTINGS);
       sendJSON('POST', '/api/settings', USER_SETTINGS).then(function() {
-        setMsg('settings-msg', 'Сохранено', true);
+        setMsg(k === 'ai_enabled' ? 'ai-msg' : 'settings-msg', 'Сохранено', true);
+        if (k === 'ai_enabled') { updateAiStatus(); }
       }).catch(function(err) {
-        setMsg('settings-msg', friendlyErrorMessage(err), false);
+        setMsg(k === 'ai_enabled' ? 'ai-msg' : 'settings-msg', friendlyErrorMessage(err), false);
       });
     });
   });
@@ -2475,6 +3402,56 @@ function bindSettings() {
 
 applySettings(USER_SETTINGS || {});
 bindSettings();
+
+async function testAi() {
+  var msg = document.getElementById('ai-msg');
+  if (msg) { msg.textContent = '⏳ Выполняется реальный тест GigaChat…'; msg.className = 'message'; }
+  try {
+    var res = await fetch('/api/ai-test', {
+      method: 'POST',
+      headers: { 'X-CSRF-Token': csrf }
+    });
+    var out = await res.json();
+    if (!res.ok || !out.ok) {
+      throw new Error(out.message || ('HTTP ' + res.status));
+    }
+    if (msg) {
+      msg.textContent = '🟢 GigaChat отвечает: ' + out.answer + ' · ' + (out.model || GIGACHAT_MODEL);
+      msg.className = 'message success';
+    }
+    updateAiStatus();
+  } catch (err) {
+    if (msg) {
+      msg.textContent = '🔴 ' + friendlyErrorMessage(err);
+      msg.className = 'message error';
+    }
+  }
+}
+
+async function updateAiStatus() {
+  var box = document.getElementById('ai-status');
+  var toggle = document.getElementById('set-ai-enabled');
+  if (!box) return;
+  if (toggle && !toggle.checked) {
+    box.textContent = '⚪ ИИ отключён пользователем';
+    return;
+  }
+  box.textContent = '⏳ Проверка доступности ИИ…';
+  try {
+    var res = await fetch('/api/ai-status');
+    var out = await res.json();
+    if (out.available) {
+      box.textContent = '🟢 ИИ: GigaChat доступен · ' + (out.model || 'GigaChat');
+    } else {
+      box.textContent = (out.code === 'disabled' || out.code === 'missing_key')
+        ? '⚪ ИИ: ' + (out.message || 'не настроен')
+        : '🔴 ИИ: ' + (out.message || 'недоступен');
+    }
+  } catch (err) {
+    box.textContent = '🔴 ИИ: недоступен';
+  }
+}
+updateAiStatus();
 
 var THEME_KEY = 'medical_diary_theme';
 
@@ -2499,13 +3476,17 @@ function onThemeToggleChange(el) {
 
 applyTheme();
 if (window.matchMedia) {
-  // Если пользователь не выбирал тему вручную, продолжаем следовать
-  // системной теме даже после смены системной настройки "на лету".
-  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', function() {
+  // Старые Safari/iOS используют addListener вместо addEventListener.
+  var themeMedia = window.matchMedia('(prefers-color-scheme: dark)');
+  var onThemeMediaChange = function() {
     var stored = null;
     try { stored = localStorage.getItem(THEME_KEY); } catch (e) {}
     if (!stored) { applyTheme(); }
-  });
+  };
+  try {
+    if (themeMedia.addEventListener) { themeMedia.addEventListener('change', onThemeMediaChange); }
+    else if (themeMedia.addListener) { themeMedia.addListener(onThemeMediaChange); }
+  } catch (e) {}
 }
 
 function showToast(text, ok) {
@@ -2580,6 +3561,9 @@ async function repeatLast(type, ev) {
       document.querySelector('#vitals-form [name="diastolic"]').value = out.diastolic;
       document.querySelector('#vitals-form [name="pulse"]').value = out.pulse != null ? out.pulse : '';
       document.querySelector('#vitals-form [name="comment"]').value = out.comment || '';
+    } else if (type === 'temperature') {
+      document.querySelector('#temperature-form [name="value"]').value = out.value;
+      document.querySelector('#temperature-form [name="comment"]').value = out.comment || '';
     } else {
       document.querySelector('#food-form [name="food_name"]').value = out.food_name;
       document.querySelector('#food-form [name="amount_value"]').value = out.amount_value;
@@ -2623,6 +3607,8 @@ async function loadOneLastStatus(type) {
       summary = out.value.toFixed(1) + ' ммоль/л (' + (out.glucose_type === 'fasting' ? 'натощак' : 'после еды') + ')';
     } else if (type === 'vitals') {
       summary = out.systolic + '/' + out.diastolic + (out.pulse != null ? ', пульс ' + out.pulse : '');
+    } else if (type === 'temperature') {
+      summary = Number(out.value).toFixed(1) + ' °C';
     } else {
       summary = out.food_name + ', ' + out.amount_value + ' ' + out.amount_unit;
     }
@@ -2635,6 +3621,7 @@ async function loadOneLastStatus(type) {
 function loadLastEntryStatuses() {
   loadOneLastStatus('glucose');
   loadOneLastStatus('vitals');
+  loadOneLastStatus('temperature');
   loadOneLastStatus('food');
 }
 loadLastEntryStatuses();
@@ -2921,6 +3908,27 @@ function updateDateLabels() {
       finally { if (btn) { btn.disabled = false; } }
     });
 
+    document.getElementById('temperature-form').addEventListener('submit', async function(e) {
+      e.preventDefault();
+      var f = e.target;
+      var btn = f.querySelector('button[type="submit"]');
+      if (btn) { btn.disabled = true; }
+      try {
+        await postJSON('/api/temperature', {
+          value: f.value.value,
+          measured_at: f.measured_at.value.replace('T', ' '),
+          comment: f.comment.value
+        }, { 'Idempotency-Key': genIdemKey() });
+        setMsg('temperature-msg', '', true);
+        showToast('Запись температуры сохранена', true);
+        f.value.value = '';
+        f.comment.value = '';
+        loadHistory();
+        loadLastEntryStatuses();
+      } catch (err) { setMsg('temperature-msg', friendlyErrorMessage(err), false); showToast(friendlyErrorMessage(err), false); }
+      finally { if (btn) { btn.disabled = false; } }
+    });
+
     document.getElementById('food-form').addEventListener('submit', async function(e) {
       e.preventDefault();
       var f = e.target;
@@ -3119,6 +4127,11 @@ function updateDateLabels() {
           { points: diaPoints, shape: 'square' }
         ], vBands);
       }
+      var tempPoints = entries.filter(function(e) { return e.type === 'temperature'; }).map(function(e) { return { x: toTimestamp(e.measured_at), y: e.temperature_c, status: 'ok' }; }).sort(function(a,b){ return a.x-b.x; });
+      var tWrap = document.getElementById('trend-temperature-wrap');
+      var hasTemperature = tempPoints.length >= 2;
+      if (tWrap) { tWrap.hidden = !hasTemperature; }
+      if (hasTemperature) { drawLineChart(document.getElementById('trend-temperature'), [{ points: tempPoints, shape: 'circle' }], []); }
     }
 
     async function loadHistory() {
@@ -3126,9 +4139,7 @@ function updateDateLabels() {
       var df = hp.df;
       var dt = hp.dt;
       var cards = document.getElementById('history-cards');
-      var tbody = document.querySelector('#history-table tbody');
       if (cards) { cards.innerHTML = '<div class="muted">Загрузка…</div>'; }
-      if (tbody) { tbody.innerHTML = ''; }
       try {
         var res = await fetch('/api/history?date_from=' + encodeURIComponent(df) + '&date_to=' + encodeURIComponent(dt) + '&type=' + encodeURIComponent(hp.type) + '&sort=' + encodeURIComponent(hp.sort));
         if (res.status === 401) { window.location = '/login'; return; }
@@ -3193,15 +4204,28 @@ function updateDateLabels() {
           card.appendChild(statuses); appendComment(card, entry.comment);
           return card;
         }
+        function renderTemperature(entry) {
+          var card=document.createElement('article'); card.className='history-entry';
+          var top=document.createElement('div'); top.className='history-entry-top';
+          var icon=document.createElement('div'); icon.className='history-icon temperature'; icon.textContent='🌡️'; top.appendChild(icon);
+          var main=document.createElement('div'); main.className='history-entry-main';
+          var title=document.createElement('div'); title.className='history-entry-title'; title.textContent='Температура'; main.appendChild(title);
+          var meta=document.createElement('div'); meta.className='history-entry-meta'; meta.textContent=(entry.measured_at ? entry.measured_at.substring(11,16) : ''); main.appendChild(meta); top.appendChild(main); card.appendChild(top);
+          var val=document.createElement('div'); val.className='history-value';
+          var num=document.createElement('span'); num.className='number'; num.textContent=Number(entry.temperature_c).toFixed(1); val.appendChild(num);
+          var unit=document.createElement('span'); unit.className='unit'; unit.textContent='°C'; val.appendChild(unit); card.appendChild(val);
+          appendComment(card, entry.comment); return card;
+        }
+
         function renderFood(entry) {
           var card=document.createElement('article'); card.className='history-entry';
           var top=document.createElement('div'); top.className='history-entry-top'; var icon=document.createElement('div'); icon.className='history-icon'; icon.textContent='🥗'; top.appendChild(icon); var main=document.createElement('div'); main.className='history-entry-main'; var title=document.createElement('div'); title.className='history-entry-title'; title.textContent='Питание'; main.appendChild(title); var meta=document.createElement('div'); meta.className='history-entry-meta'; meta.textContent=(entry.measured_at ? entry.measured_at.substring(11,16) : ''); main.appendChild(meta); top.appendChild(main); card.appendChild(top);
-          var line=document.createElement('div'); line.className='food-line'; line.textContent=entry.food_name + ' · '; var amount=document.createElement('span'); amount.className='food-amount'; amount.textContent=(Number(entry.amount_value).toLocaleString('ru-RU') + ' ' + (entry.amount_unit || '')); line.appendChild(amount); card.appendChild(line); appendComment(card, entry.comment); return card;
+          var line=document.createElement('div'); line.className='food-line'; line.textContent=entry.food_name + ' · '; var amount=document.createElement('span'); amount.className='food-amount'; amount.textContent=(Number(entry.amount_value).toLocaleString('ru-RU') + ' ' + unitRu(entry.amount_unit)); line.appendChild(amount); card.appendChild(line); appendComment(card, entry.comment); return card;
         }
 
         out.entries.forEach(function(entry) {
           if (groupByDay) { var day=(entry.measured_at||'').substring(0,10); if(day!==lastDay){lastDay=day; addDay(day);} }
-          var card = entry.type==='glucose' ? renderGlucose(entry) : entry.type==='vitals' ? renderVitals(entry) : renderFood(entry);
+          var card = entry.type==='glucose' ? renderGlucose(entry) : entry.type==='vitals' ? renderVitals(entry) : entry.type==='temperature' ? renderTemperature(entry) : renderFood(entry);
           var actions=document.createElement('div'); actions.className='history-actions';
           actions.appendChild(makeActionButton('✏️','', 'Редактировать запись', function(){startEdit(entry);}));
           actions.appendChild(makeActionButton('🗑️','delete', 'Удалить запись', function(){deleteEntry(entry);})); card.appendChild(actions);
@@ -3362,6 +4386,15 @@ function updateDateLabels() {
           var td3 = document.createElement('td');
           td3.textContent = (b.size_bytes / (1024 * 1024)).toFixed(1) + ' МБ';
           tr.appendChild(td3);
+
+          var td4 = document.createElement('td');
+          var restoreBtn = document.createElement('button');
+          restoreBtn.type = 'button';
+          restoreBtn.className = 'backup-restore-btn';
+          restoreBtn.textContent = 'Восстановить';
+          restoreBtn.addEventListener('click', function() { restoreBackup(b.name); });
+          td4.appendChild(restoreBtn);
+          tr.appendChild(td4);
           tbody.appendChild(tr);
         });
       } catch (err) {
@@ -3375,6 +4408,25 @@ function updateDateLabels() {
         setMsg('backup-msg', 'Копия создана: ' + out.file, true);
         showToast('Резервная копия создана', true);
         loadBackupStatus();
+      } catch (err) {
+        setMsg('backup-msg', friendlyErrorMessage(err), false);
+        showToast(friendlyErrorMessage(err), false);
+      }
+    }
+
+    async function restoreBackup(filename) {
+      var warning = 'Восстановить базу данных из копии «' + filename + '»?\\n\\n'
+        + 'Текущее состояние сначала будет сохранено в аварийную копию. '
+        + 'Данные, созданные после выбранной резервной копии, будут заменены её содержимым.\\n\\n'
+        + 'После восстановления потребуется повторно войти в приложение.';
+      if (!window.confirm(warning)) return;
+
+      try {
+        var out = await sendJSON('POST', '/api/admin/backups/restore', { filename: filename });
+        setMsg('backup-msg', 'База восстановлена из ' + out.restored_file
+          + '. Аварийная копия: ' + out.emergency_backup, true);
+        showToast('База восстановлена. Выполняется выход…', true);
+        setTimeout(function() { window.location = '/login'; }, 900);
       } catch (err) {
         setMsg('backup-msg', friendlyErrorMessage(err), false);
         showToast(friendlyErrorMessage(err), false);
@@ -3536,7 +4588,15 @@ function updateDateLabels() {
       }
     }
 
-    var UNIT_RU_JS = { 'g': 'г', 'ml': 'мл', 'pcs': 'шт', 'portion': 'порция' };
+    var UNIT_RU_JS = {
+      'g':'г','gram':'г','grams':'г','kg':'кг','kilogram':'кг','kilograms':'кг',
+      'mg':'мг','milligram':'мг','milligrams':'мг','mcg':'мкг','µg':'мкг',
+      'ml':'мл','milliliter':'мл','milliliters':'мл','l':'л','liter':'л','liters':'л',
+      'pcs':'шт','pc':'шт','piece':'шт','pieces':'шт',
+      'portion':'порция','portions':'порция',
+      'г':'г','кг':'кг','мг':'мг','мкг':'мкг','мл':'мл','л':'л','шт':'шт','порция':'порция'
+    };
+    function unitRu(value) { var k = String(value || '').trim(); return UNIT_RU_JS[k] || k; }
     var editState = { type: null, id: null };
 
     async function sendJSON(method, url, data, extraHeaders) {
@@ -3567,6 +4627,7 @@ function updateDateLabels() {
       document.getElementById('edit-card').hidden = false;
       document.getElementById('edit-glucose').hidden = entry.type !== 'glucose';
       document.getElementById('edit-vitals').hidden = entry.type !== 'vitals';
+      document.getElementById('edit-temperature').hidden = entry.type !== 'temperature';
       document.getElementById('edit-food').hidden = entry.type !== 'food';
       document.getElementById('edit-title').textContent = '✏️ ' + entry.type_label + ' · ' + (entry.measured_at_ru || entry.measured_at);
 
@@ -3580,6 +4641,8 @@ function updateDateLabels() {
         document.getElementById('edit_systolic').value = entry.systolic_mmhg;
         document.getElementById('edit_diastolic').value = entry.diastolic_mmhg;
         document.getElementById('edit_pulse').value = (entry.pulse_bpm == null) ? '' : entry.pulse_bpm;
+      } else if (entry.type === 'temperature') {
+        document.getElementById('edit_temperature_value').value = entry.temperature_c;
       } else if (entry.type === 'food') {
         document.getElementById('edit_food_name').value = entry.food_name;
         document.getElementById('edit_amount_value').value = entry.amount_value;
@@ -3621,12 +4684,19 @@ function updateDateLabels() {
           measured_at: ma,
           comment: cm
         };
+      } else if (editState.type === 'temperature') {
+        url = '/api/temperature/' + editState.id;
+        payload = {
+          value: document.getElementById('edit_temperature_value').value,
+          measured_at: ma,
+          comment: cm
+        };
       } else if (editState.type === 'food') {
         url = '/api/food/' + editState.id;
         payload = {
           food_name: document.getElementById('edit_food_name').value,
           amount_value: document.getElementById('edit_amount_value').value,
-          amount_unit: document.getElementById('edit_amount_unit').value,
+          amount_unit: unitRu(document.getElementById('edit_amount_unit').value),
           consumed_at: ma,
           comment: cm
         };
@@ -3650,6 +4720,7 @@ function updateDateLabels() {
       var url = '';
       if (entry.type === 'glucose') { url = '/api/glucose/' + entry.id; }
       else if (entry.type === 'vitals') { url = '/api/vitals/' + entry.id; }
+      else if (entry.type === 'temperature') { url = '/api/temperature/' + entry.id; }
       else if (entry.type === 'food') { url = '/api/food/' + entry.id; }
 
       try {
@@ -3671,8 +4742,33 @@ function updateDateLabels() {
     var pinchState = null;
     var pinchBound = false;
     var rerenderTimer = null;
-    if (typeof pdfjsLib !== 'undefined') {
-      pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.js';
+    var pdfJsLoadPromise = null;
+
+    function ensurePdfJsLoaded() {
+      if (typeof pdfjsLib !== 'undefined') {
+        try {
+          if (pdfjsLib.GlobalWorkerOptions) { pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.js'; }
+        } catch (e) {}
+        return Promise.resolve(pdfjsLib);
+      }
+      if (pdfJsLoadPromise) { return pdfJsLoadPromise; }
+      pdfJsLoadPromise = new Promise(function(resolve, reject) {
+        var script = document.createElement('script');
+        script.src = '/pdf.min.js';
+        script.async = true;
+        script.onload = function() {
+          if (typeof pdfjsLib === 'undefined') {
+            reject(new Error('Модуль PDF не загрузился')); return;
+          }
+          try {
+            if (pdfjsLib.GlobalWorkerOptions) { pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.js'; }
+          } catch (e) {}
+          resolve(pdfjsLib);
+        };
+        script.onerror = function() { reject(new Error('Не удалось загрузить модуль PDF')); };
+        document.head.appendChild(script);
+      });
+      return pdfJsLoadPromise;
     }
 
     function clampZoom(z) { return Math.min(4, Math.max(1, z)); }
@@ -3774,7 +4870,6 @@ function updateDateLabels() {
 
     async function openPdfViewer() {
       if (!currentExportUrl) { setMsg('history-msg', 'Сначала дождитесь загрузки истории', false); return; }
-      if (typeof pdfjsLib === 'undefined') { setMsg('history-msg', 'pdf.js не загрузился', false); return; }
 
       var overlay = document.getElementById('pdf-overlay');
       var pages = document.getElementById('pdf-pages');
@@ -3788,18 +4883,41 @@ function updateDateLabels() {
       updateZoomLabel();
 
       try {
+        var pdfLib = await ensurePdfJsLoaded();
         var res = await fetch(currentExportUrl);
         if (res.status === 401) { window.location = '/login'; return; }
         if (!res.ok) { throw new Error('HTTP ' + res.status); }
         pdfBlob = await res.blob();
         var data = await pdfBlob.arrayBuffer();
-        pdfDoc = await pdfjsLib.getDocument({ data: data }).promise;
+        pdfDoc = await pdfLib.getDocument({ data: data }).promise;
         pages.innerHTML = '';
         pdfPages = [];
         await renderPdfPages(1);
         bindPinch();
       } catch (err) {
         pages.innerHTML = '<div class="pdf-status">Ошибка просмотра: ' + friendlyErrorMessage(err) + '</div>';
+      }
+    }
+
+    function downloadPdf() {
+      if (!pdfBlob) {
+        alert('PDF ещё не сформирован.');
+        return;
+      }
+      try {
+        var url = URL.createObjectURL(pdfBlob);
+        var a = document.createElement('a');
+        a.href = url;
+        a.download = 'medical_diary.pdf';
+        a.style.display = 'none';
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(function() {
+          document.body.removeChild(a);
+          URL.revokeObjectURL(url);
+        }, 1000);
+      } catch (err) {
+        alert('Не удалось сохранить PDF: ' + friendlyErrorMessage(err));
       }
     }
 
