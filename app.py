@@ -403,13 +403,51 @@ def _gigachat_get_access_token():
             raise ValueError("GigaChat не вернул access_token")
 
         try:
-            expires_at = float(result.get("expires_at"))
+            raw_expires_at = float(result.get("expires_at"))
         except (TypeError, ValueError):
+            raw_expires_at = None
+
+        if raw_expires_at is None:
             expires_at = time.time() + 1500
+        else:
+            # ВАЖНО: GigaChat возвращает expires_at как Unix-время в
+            # МИЛЛИСЕКУНДАХ, а не в секундах (подтверждено документацией
+            # Sber). При использовании этого значения "как есть" оно почти
+            # в 1000 раз больше текущего time.time(), поэтому кэш токена
+            # выглядел валидным ещё десятки тысяч лет вперёд и никогда не
+            # обновлялся — а реальный токен GigaChat живёт всего 30 минут.
+            # Итог: первый запрос после старта контейнера работал (токен
+            # только что получен), а на следующий день все запросы падали
+            # с HTTP 401, и это не лечилось ничем, кроме перезапуска
+            # контейнера (который сбрасывает кэш через глобальные
+            # переменные модуля).
+            expires_at = raw_expires_at / 1000.0
+            # Доп. подстраховка: реальный токен живёт ~30 минут, поэтому
+            # если после конвертации получили больше часа от текущего
+            # момента — формат ответа не тот, что мы ожидаем, и лучше
+            # перестраховаться коротким временем жизни, чем снова
+            # закэшировать токен на неопределённо долгий срок.
+            if expires_at > time.time() + 3600:
+                expires_at = time.time() + 1500
 
         _gigachat_access_token = token
         _gigachat_token_expires_at = expires_at
         return token
+
+
+def _gigachat_invalidate_token():
+    """Сбрасывает закэшированный OAuth-токен GigaChat.
+
+    Вызывается при получении HTTP 401 от самого GigaChat: если сервер
+    говорит, что токен невалиден, значит наше представление о его сроке
+    действия разошлось с реальностью (например, токен отозван раньше
+    срока) — не дожидаясь перезапуска контейнера, следующий вызов
+    _gigachat_get_access_token() получит новый токен.
+    """
+    global _gigachat_access_token, _gigachat_token_expires_at
+    with _gigachat_token_lock:
+        _gigachat_access_token = None
+        _gigachat_token_expires_at = 0.0
 
 
 def _normalize_ai_text(value, max_chars):
@@ -645,6 +683,8 @@ def _gigachat_generate_assessments(candidates, ranges_payload, enabled=True):
 
     except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError,
             ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
+        if isinstance(exc, urllib.error.HTTPError) and exc.code == 401:
+            _gigachat_invalidate_token()
         print(f"[gigachat] assessment generation failed: {type(exc).__name__}: {exc}", flush=True)
 
     return generated
@@ -2795,6 +2835,7 @@ def api_ai_status():
     except urllib.error.HTTPError as exc:
         if exc.code == 401:
             code, message = "auth_error", "Ошибка авторизации GigaChat: проверьте GIGACHAT_AUTH_KEY"
+            _gigachat_invalidate_token()
         elif exc.code == 403:
             code, message = "forbidden", "GigaChat отклонил запрос (403)"
         elif exc.code == 429:
@@ -2865,6 +2906,7 @@ def api_ai_test():
     except urllib.error.HTTPError as exc:
         if exc.code == 401:
             code, message = "auth_error", "Ошибка авторизации GigaChat"
+            _gigachat_invalidate_token()
         elif exc.code == 403:
             code, message = "forbidden", "GigaChat отклонил запрос (403)"
         elif exc.code == 402:
