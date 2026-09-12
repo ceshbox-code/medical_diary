@@ -1779,9 +1779,28 @@ def api_weight():
 MAX_HISTORY_RANGE_DAYS = 366
 
 
-def query_entries(user_id, date_from=None, date_to=None, entry_type="all", sort="date", ranges=None):
-    if entry_type not in ("all", "glucose", "vitals", "food", "temperature", "weight"):
+VALID_ENTRY_TYPES = ("glucose", "vitals", "temperature", "weight", "food")
+
+
+def _parse_entry_types(entry_type):
+    """Разбирает параметр типа записей фильтра/PDF-экспорта.
+
+    Принимает 'all' (все типы) либо список типов через запятую, например
+    'glucose,weight,food' — так поддерживается выбор нескольких, но не всех,
+    типов записей одновременно. Возвращает множество типов для выборки.
+    """
+    if entry_type == "all":
+        return set(VALID_ENTRY_TYPES)
+
+    parts = [p.strip() for p in entry_type.split(",") if p.strip()]
+    if not parts or any(p not in VALID_ENTRY_TYPES for p in parts):
         raise ValueError("Некорректный тип фильтра")
+
+    return set(parts)
+
+
+def query_entries(user_id, date_from=None, date_to=None, entry_type="all", sort="date", ranges=None):
+    selected_types = _parse_entry_types(entry_type)
     if sort not in ("date", "value"):
         raise ValueError("Некорректный порядок сортировки")
 
@@ -1804,7 +1823,7 @@ def query_entries(user_id, date_from=None, date_to=None, entry_type="all", sort=
     db = get_db()
     entries = []
 
-    if entry_type in ("all", "glucose"):
+    if "glucose" in selected_types:
         rows = db.execute(
             """
             SELECT *
@@ -1842,7 +1861,7 @@ def query_entries(user_id, date_from=None, date_to=None, entry_type="all", sort=
                 }
             )
 
-    if entry_type in ("all", "vitals"):
+    if "vitals" in selected_types:
         rows = db.execute(
             """
             SELECT *
@@ -1897,7 +1916,7 @@ def query_entries(user_id, date_from=None, date_to=None, entry_type="all", sort=
                 }
             )
 
-    if entry_type in ("all", "food"):
+    if "food" in selected_types:
         rows = db.execute(
             """
             SELECT *
@@ -1929,7 +1948,7 @@ def query_entries(user_id, date_from=None, date_to=None, entry_type="all", sort=
                 }
             )
 
-    if entry_type in ("all", "temperature"):
+    if "temperature" in selected_types:
         rows = db.execute(
             """
             SELECT *
@@ -1961,7 +1980,7 @@ def query_entries(user_id, date_from=None, date_to=None, entry_type="all", sort=
                 }
             )
 
-    if entry_type in ("all", "weight"):
+    if "weight" in selected_types:
         rows = db.execute(
             """
             SELECT *
@@ -2285,14 +2304,30 @@ def export_pdf():
 
     entries = add_assessments(entries, ranges)
     entries, ai_used = add_ai_assessments(entries, ranges, enabled=_settings.get("ai_enabled", True))
-    type_label = {
-        "all": "Все записи",
-        "glucose": "Только глюкоза",
-        "vitals": "Только давление и пульс",
-        "temperature": "Только температура",
-        "weight": "Только вес",
-        "food": "Только питание",
-    }.get(request.args.get("type", "all"), "Все записи")
+
+    type_short_labels = {
+        "glucose": "глюкоза",
+        "vitals": "давление и пульс",
+        "temperature": "температура",
+        "weight": "вес",
+        "food": "питание",
+    }
+    requested_type = request.args.get("type", "all")
+    try:
+        requested_set = _parse_entry_types(requested_type)
+    except ValueError:
+        requested_set = set(VALID_ENTRY_TYPES)
+
+    if requested_set == set(VALID_ENTRY_TYPES):
+        type_label = "Все записи"
+    else:
+        ordered = [t for t in VALID_ENTRY_TYPES if t in requested_set]
+        if len(ordered) == 1:
+            type_label = f"Только {type_short_labels[ordered[0]]}"
+        else:
+            labels = [type_short_labels[t] for t in ordered]
+            labels[0] = labels[0][0].upper() + labels[0][1:]
+            type_label = ", ".join(labels)
 
     db = get_db()
     owner = db.execute(
@@ -3524,7 +3559,7 @@ html.theme-dark{--bg:#08111d;--surface:#101b2a;--surface-2:#142238;--surface-3:#
 *,:before,:after{box-sizing:border-box}html,body{min-height:100%;overflow-x:hidden}body{margin:0;background:radial-gradient(circle at 50% -10%,rgba(47,140,255,.08),transparent 35%),var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","Segoe UI",sans-serif;-webkit-text-size-adjust:100%;padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);overscroll-behavior-x:none}[hidden]{display:none!important}button,input,select,textarea{font:inherit}button{cursor:pointer}button:disabled{opacity:.55;cursor:wait}
 .app-shell{width:100%;max-width:760px;margin:0 auto;padding-bottom:100px}.topbar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:18px 18px 6px}.brand{min-width:0}.eyebrow{font-size:13px;font-weight:650;color:var(--muted);margin-bottom:3px}.brand-title{font-size:22px;line-height:1.1;font-weight:850;letter-spacing:-.5px}.link-btn{border:0;background:transparent;color:var(--primary-strong);font-size:13px;font-weight:800;padding:0}.user-pill{max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted);font-size:13px;font-weight:700}.header-action{width:42px;height:42px;border:1px solid var(--border);border-radius:14px;background:var(--surface);color:var(--text);font-size:20px;box-shadow:var(--shadow)}
 main{width:100%;padding:10px 16px 18px}.page-intro{margin:8px 2px 18px}.page-intro h1,.history-head h1{margin:0;font-size:32px;line-height:1.05;letter-spacing:-.8px}.page-intro p{margin:7px 0 0;color:var(--muted);font-size:14px}.section-label{display:flex;align-items:center;justify-content:space-between;margin:18px 2px 10px}.section-label strong{font-size:14px;letter-spacing:.2px}.section-label span{font-size:13px;color:var(--primary-strong);font-weight:750}
-.quick-list{display:grid;gap:10px}.quick-card{display:grid;grid-template-columns:48px minmax(0,1fr) 22px;align-items:center;column-gap:13px;width:100%;min-height:82px;padding:14px;border:1px solid var(--border);border-radius:17px;background:linear-gradient(145deg,var(--surface),var(--surface-2));color:var(--text);text-align:left;box-shadow:var(--shadow);-webkit-appearance:none;appearance:none}.quick-card:active{transform:scale(.99)}.quick-icon,.history-icon{width:48px;height:48px;display:grid;place-items:center;flex:0 0 48px;border-radius:50%;font-size:24px;color:#fff;box-shadow:inset 0 1px 1px rgba(255,255,255,.25)}.quick-icon.glucose,.history-icon.glucose{background:var(--glucose)}.quick-icon.vitals,.history-icon.vitals{background:var(--vitals)}.quick-icon.food,.history-icon.food{background:var(--food)}.quick-icon.temperature,.history-icon.temperature{background:#e28a2f}.quick-icon.weight,.history-icon.weight{background:#7a5cff}.quick-copy{min-width:0;display:flex;flex-direction:column;justify-content:center;align-items:flex-start}.quick-title{display:block;font-size:17px;line-height:1.2;font-weight:800}.quick-sub{display:block;margin-top:6px;font-size:13px;line-height:1.2;color:var(--muted);font-weight:650}.chevron{font-size:25px;line-height:1;color:var(--faint);justify-self:end}
+.quick-list{display:grid;gap:10px}.quick-card{display:grid;grid-template-columns:64px minmax(0,1fr) 22px;align-items:center;column-gap:13px;width:100%;min-height:82px;padding:14px;border:1px solid var(--border);border-radius:17px;background:linear-gradient(145deg,var(--surface),var(--surface-2));color:var(--text);text-align:left;box-shadow:var(--shadow);-webkit-appearance:none;appearance:none}.quick-card:active{transform:scale(.99)}.quick-icon,.history-icon{width:48px;height:48px;display:grid;place-items:center;flex:0 0 48px;border-radius:50%;font-size:24px;color:#fff;box-shadow:inset 0 1px 1px rgba(255,255,255,.25)}.history-icon.glucose{background:var(--glucose)}.history-icon.vitals{background:var(--vitals)}.history-icon.food{background:var(--food)}.history-icon.temperature{background:#e28a2f}.history-icon.weight{background:#7a5cff}.quick-icon{width:64px;height:64px;flex:0 0 64px;font-size:48px;background:var(--bg);color:var(--text);box-shadow:none;border:1px solid var(--border)}.quick-icon.glucose{color:var(--glucose)}.quick-icon.vitals{color:var(--vitals)}.quick-icon.food{color:var(--food)}.quick-icon.temperature{color:#e28a2f}.quick-icon.weight{color:#7a5cff}.quick-copy{min-width:0;display:flex;flex-direction:column;justify-content:center;align-items:flex-start}.quick-title{display:block;font-size:17px;line-height:1.2;font-weight:800}.quick-sub{display:block;margin-top:6px;font-size:13px;line-height:1.2;color:var(--muted);font-weight:650}.chevron{font-size:25px;line-height:1;color:var(--faint);justify-self:end}
 .recent-list{display:grid;gap:8px}.recent-card{display:flex;align-items:center;gap:10px;padding:11px 13px;border:1px solid var(--border);border-radius:15px;background:var(--surface);box-shadow:0 4px 14px rgba(27,54,84,.05)}.recent-copy{min-width:0;flex:1}.recent-title{font-size:14px;font-weight:800}.recent-value{margin-top:2px;font-size:13px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.recent-time{font-size:11px;color:var(--muted);align-self:flex-start}.day-summary{display:grid;grid-template-columns:repeat(4,1fr);margin-top:10px;border:1px solid var(--border);border-radius:16px;background:var(--surface);overflow:hidden}.day-stat{padding:12px 6px;text-align:center;border-right:1px solid var(--border)}.day-stat:last-child{border-right:0}.day-stat .num{font-size:18px;font-weight:850}.day-stat .label{margin-top:2px;font-size:11px;color:var(--muted)}
 .card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:16px;margin-bottom:12px;box-shadow:var(--shadow);overflow:hidden}.flat{box-shadow:none}label{display:block;margin:13px 0 6px;font-size:13px;font-weight:750;color:var(--text)}input,select,textarea{display:block;width:100%;min-height:48px;border:1px solid var(--border);border-radius:13px;background:var(--surface-2);color:var(--text);padding:10px 12px;font-size:17px;outline:none}input:focus,select:focus,textarea:focus{border-color:var(--primary);box-shadow:0 0 0 3px rgba(47,140,255,.13)}textarea{min-height:82px;resize:vertical}.row{display:grid;grid-template-columns:1fr 1fr;gap:10px}.row>div{min-width:0}
 .admin-action{display:flex;align-items:center;justify-content:center;width:100%;min-height:48px;margin:10px 0 12px;padding:10px 14px;border:1px solid var(--primary);border-radius:13px;background:var(--primary);color:#fff;font-size:14px;font-weight:800;box-shadow:0 6px 16px rgba(47,140,255,.18)}.admin-action:active{transform:scale(.99)}.table-wrap{width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch;border:1px solid var(--border);border-radius:14px;background:var(--surface)}#users-table,#backup-table{width:100%;border-collapse:collapse;table-layout:fixed;min-width:520px}#users-table th,#users-table td,#backup-table th,#backup-table td{padding:11px 12px;border-bottom:1px solid var(--border);text-align:left;vertical-align:middle;font-size:13px;line-height:1.25}#users-table th,#backup-table th{background:var(--surface-2);font-size:12px;font-weight:800;color:var(--muted);white-space:nowrap}#users-table tr:last-child td,#backup-table tr:last-child td{border-bottom:0}#users-table th:nth-child(1),#users-table td:nth-child(1){width:34%}#users-table th:nth-child(2),#users-table td:nth-child(2){width:42%}#users-table th:nth-child(3),#users-table td:nth-child(3){width:24%;text-align:right}.cell-actions{display:flex;justify-content:flex-end;align-items:center;gap:6px;white-space:nowrap}.cell-actions button{width:38px;height:38px;padding:0;border:1px solid var(--border);border-radius:11px;background:var(--surface-2);color:var(--text);display:inline-grid;place-items:center;font-size:16px}.cell-actions .del-btn{color:var(--danger)}#backup-table{min-width:620px}#backup-table th:nth-child(1),#backup-table td:nth-child(1){width:43%;word-break:break-word}#backup-table th:nth-child(2),#backup-table td:nth-child(2){width:22%;white-space:nowrap}#backup-table th:nth-child(3),#backup-table td:nth-child(3){width:13%;white-space:nowrap}#backup-table th:nth-child(4),#backup-table td:nth-child(4){width:22%;text-align:right;white-space:nowrap}.backup-restore-btn{min-height:38px;padding:8px 11px;border:1px solid var(--danger);border-radius:11px;background:var(--danger-soft);color:var(--danger);font-size:12px;font-weight:800}.admin-section details>summary{padding:2px 0 12px;font-weight:800}.admin-section form{margin-bottom:14px}.admin-section .table-wrap{margin-top:10px}.modal{position:fixed;inset:0;z-index:80;background:rgba(4,10,18,.62);display:flex;align-items:flex-end;justify-content:center;padding:0}.modal-panel{width:100%;max-width:760px;max-height:94vh;overflow:auto;background:var(--bg);border:1px solid var(--border);border-bottom:0;border-radius:24px 24px 0 0;padding:10px 16px calc(22px + env(safe-area-inset-bottom));box-shadow:0 -18px 50px rgba(0,0,0,.28)}.modal-grabber{width:42px;height:5px;border-radius:10px;background:var(--faint);opacity:.55;margin:2px auto 13px}.modal-head{display:flex;align-items:center;gap:11px;margin-bottom:13px}.modal-title{flex:1;min-width:0}.modal-title h2{margin:0;font-size:22px;letter-spacing:-.4px}.modal-title p{margin:3px 0 0;color:var(--muted);font-size:12px}.close-btn{width:40px;height:40px;border:1px solid var(--border);border-radius:13px;background:var(--surface);color:var(--text);font-size:22px}.metric-hero{padding:17px;border:1px solid var(--border);border-radius:18px;background:linear-gradient(145deg,var(--surface),var(--surface-2));margin-bottom:12px}.metric-hero label{margin:0 0 6px}.metric-input{display:flex;align-items:baseline;gap:10px}.metric-input input{border:0;background:transparent;padding:0;min-height:64px;height:64px;font-size:56px;font-weight:850;letter-spacing:-2px;line-height:1;box-shadow:none}.metric-unit{font-size:16px;font-weight:800}.metric-status{margin-top:10px}.segmented{display:grid;grid-template-columns:1fr 1fr;gap:7px}.segmented input{position:absolute;opacity:0;pointer-events:none;width:1px;height:1px}.segmented label{display:flex;align-items:center;justify-content:center;min-height:46px;margin:0;padding:8px;border:1px solid var(--border);border-radius:13px;background:var(--surface-2);font-size:14px}.segmented input:checked+label{background:var(--primary);border-color:var(--primary);color:#fff}.field-hint{margin:5px 0 0;color:var(--muted);font-size:11px}.quick-repeat{width:100%;min-height:46px;margin-top:10px;border:1px solid var(--border);border-radius:13px;background:var(--surface-2);color:var(--primary-strong);font-weight:750}.primary-action{width:100%;min-height:52px;margin-top:12px;border:0;border-radius:14px;background:var(--primary);color:#fff;font-size:16px;font-weight:800;box-shadow:0 7px 18px rgba(47,140,255,.22)}
@@ -3535,7 +3570,7 @@ main{width:100%;padding:10px 16px 18px}.page-intro{margin:8px 2px 18px}.page-int
 .tab-bar{position:fixed;left:0;right:0;bottom:0;z-index:50;display:flex;gap:8px;padding:8px 12px calc(8px + env(safe-area-inset-bottom));background:var(--surface);border-top:1px solid var(--border);box-shadow:0 -8px 25px rgba(0,0,0,.12);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px)}.tab-btn{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;min-height:56px;border:1px solid transparent;border-radius:17px;background:transparent;color:var(--muted);font-size:12px;font-weight:800}.tab-btn .tab-icon{font-size:21px;line-height:1}.tab-btn.active{background:var(--primary-soft);border-color:var(--primary);color:var(--primary-strong)}
 #toast{position:fixed;left:12px;right:12px;z-index:200;top:calc(env(safe-area-inset-top) + 9px);display:flex;justify-content:center;pointer-events:none}#toast .toast-bubble{max-width:94%;padding:10px 14px;border-radius:13px;font-size:13px;font-weight:800;color:#fff;text-align:center;opacity:0;transform:translateY(-10px);transition:.2s}.toast-bubble.show{opacity:1!important;transform:translateY(0)!important}.toast-bubble.ok{background:var(--success)}.toast-bubble.error{background:var(--danger)}
 #pdf-overlay{position:fixed;inset:0;z-index:100;background:#525659;display:flex;flex-direction:column;padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)}.pdf-toolbar{display:flex;align-items:center;gap:7px;background:#fff;padding:8px 10px}.pdf-title{flex:1;min-width:0;font-weight:700;font-size:16px}.pdf-btn{width:auto;min-height:42px;line-height:42px;margin:0;padding:0 10px;font-size:18px;border-radius:10px;background:#f0f2f5;color:#17202b}.pdf-pages{flex:1}.pdf-status{color:#fff;text-align:center;padding:24px;font-size:16px}#zoom-label{min-width:48px;text-align:center;font-weight:700;font-size:14px;color:#333}#pdf-pages{flex:1;overflow:auto;-webkit-overflow-scrolling:touch;padding:10px}#pdf-pages canvas{display:block;margin:0 auto 10px;background:#fff;border-radius:3px;box-shadow:0 1px 4px rgba(0,0,0,.4)}
-@media(min-width:520px) and (max-width:699px){.quick-list{grid-template-columns:repeat(2,minmax(0,1fr))}.quick-card{min-height:100px}}@media(min-width:700px){main{padding-left:20px;padding-right:20px}.quick-list{grid-template-columns:repeat(4,minmax(0,1fr))}.quick-card{min-height:116px;grid-template-columns:48px minmax(0,1fr) 18px;align-content:center;padding:14px}.quick-copy{align-self:center}.quick-title{font-size:16px}.quick-sub{font-size:12px}.history-cards{grid-template-columns:1fr 1fr}.history-day-title{grid-column:1/-1}}
+@media(min-width:520px) and (max-width:699px){.quick-list{grid-template-columns:repeat(2,minmax(0,1fr))}.quick-card{min-height:100px}}@media(min-width:700px){main{padding-left:20px;padding-right:20px}.quick-list{grid-template-columns:repeat(4,minmax(0,1fr))}.quick-card{min-height:116px;grid-template-columns:64px minmax(0,1fr) 18px;align-content:center;padding:14px}.quick-copy{align-self:center}.quick-title{font-size:16px}.quick-sub{font-size:12px}.history-cards{grid-template-columns:1fr 1fr}.history-day-title{grid-column:1/-1}}
 @media(max-width:430px){.history-toolbar-row{grid-template-columns:1fr}.date-grid{grid-template-columns:1fr 1fr}.preset-row{grid-template-columns:repeat(4,1fr)}.vitals-values{gap:8px}.pressure-number{font-size:27px}.vital-statuses{gap:4px}.status-badge{font-size:10px;padding:5px 6px}.range-row{grid-template-columns:minmax(0,1fr) 62px 62px}.day-summary{grid-template-columns:repeat(4,1fr)}}
 </style>
 </head>
@@ -3570,7 +3605,7 @@ main{width:100%;padding:10px 16px 18px}.page-intro{margin:8px 2px 18px}.page-int
     <div class="date-grid"><span class="date-btn">📅 <span>с</span><span class="date-val" id="date_from_label"></span><input type="date" id="date_from" aria-label="Дата начала периода"></span><span class="date-btn">📅 <span>по</span><span class="date-val" id="date_to_label"></span><input type="date" id="date_to" aria-label="Дата конца периода"></span></div>
     <div class="preset-row"><button type="button" class="preset-btn" onclick="setDateRangePreset(7)">7 дней</button><button type="button" class="preset-btn" onclick="setDateRangePreset(30)">30 дней</button><button type="button" class="preset-btn" onclick="setDateRangePreset(90)">3 месяца</button><button type="button" class="preset-btn" onclick="setDateRangePreset(365)">Год</button></div>
     <div class="history-toolbar-row"><div class="history-select"><label for="history_type">Тип записей</label><select id="history_type"><option value="all">📋 Все записи</option><option value="glucose">🩸 Только глюкоза</option><option value="vitals">♥ Только давление и пульс</option><option value="temperature">🌡️ Только температура</option><option value="weight">⚖️ Только вес</option><option value="food">🍴 Только питание</option></select></div><div class="history-select"><label>Сортировка</label><div class="button-group"><input type="radio" id="hs_date" name="history_sort" value="date" checked><label for="hs_date">📅 По дате</label><input type="radio" id="hs_value" name="history_sort" value="value"><label for="hs_value">🔢 По значению</label></div></div></div>
-    <div class="export-row"><button type="button" class="button" id="export-btn" onclick="openPdfViewer()">📄 Выгрузить PDF</button></div>
+    <div class="export-row"><button type="button" class="button" id="export-btn" onclick="openPdfTypeModal()">📄 Выгрузить PDF</button></div>
   </div>
   <div class="card flat"><div class="legend">● Натощак · ■ После еды · зелёный — целевой диапазон · красный — вне диапазона. Подсветка справочная и не является диагнозом.</div><div class="trend-chart-wrap" id="trend-glucose-wrap" hidden><div class="trend-chart-title">🩸 Глюкоза, ммоль/л</div><canvas id="trend-glucose"></canvas><p class="chart-legend">● натощак · ■ после еды · зелёным — целевой диапазон</p></div><div class="trend-chart-wrap" id="trend-vitals-wrap" hidden><div class="trend-chart-title">♥ Давление, мм рт. ст.</div><canvas id="trend-vitals"></canvas><p class="chart-legend">● систолическое · ■ диастолическое · зелёным — целевой диапазон</p></div><div class="trend-chart-wrap" id="trend-temperature-wrap" hidden><div class="trend-chart-title">🌡️ Температура, °C</div><canvas id="trend-temperature"></canvas><p class="chart-legend">● температура</p></div><div class="trend-chart-wrap" id="trend-weight-wrap" hidden><div class="trend-chart-title">⚖️ Вес, кг</div><canvas id="trend-weight"></canvas><p class="chart-legend">● вес</p></div><div class="message" id="history-msg"></div><div id="history-cards" class="history-cards" aria-live="polite"></div></div>
   <div class="card" id="edit-card" hidden><div class="edit-title" id="edit-title">✏️ Редактирование</div><div id="edit-glucose" hidden><label>Тип измерения</label><select id="edit_glucose_type"><option value="fasting">🌅 Натощак</option><option value="post_meal">🍽️ После еды</option></select><label>Значение, ммоль/л</label><input id="edit_glucose_value" class="decimal-input" type="text" inputmode="decimal"></div><div id="edit-vitals" hidden><div class="row"><div><label>Систолическое</label><input id="edit_systolic" type="number" min="30" max="400" inputmode="numeric"></div><div><label>Диастолическое</label><input id="edit_diastolic" type="number" min="10" max="300" inputmode="numeric"></div></div><label>Пульс</label><input id="edit_pulse" type="number" min="20" max="300" inputmode="numeric"></div><div id="edit-temperature" hidden><label>Температура, °C</label><input id="edit_temperature_value" class="decimal-input" type="text" inputmode="decimal"></div><div id="edit-weight" hidden><label>Вес, кг</label><input id="edit_weight_value" class="decimal-input" type="text" inputmode="decimal"></div><div id="edit-food" hidden><label>Продукт</label><input id="edit_food_name" maxlength="150"><div class="row"><div><label>Количество</label><input id="edit_amount_value" class="decimal-input" type="text" inputmode="decimal"></div><div><label>Единица</label><select id="edit_amount_unit"><option value="г">г</option><option value="мл">мл</option><option value="шт">шт</option><option value="порция">порция</option></select></div></div></div><label>Дата и время</label><input id="edit_measured_at" type="datetime-local"><label>Комментарий</label><textarea id="edit_comment" maxlength="1000"></textarea><button type="button" class="primary-action" onclick="saveEdit()">Сохранить изменения</button><button type="button" class="quick-repeat" onclick="closeEdit()">Отмена</button><div class="message" id="edit-msg"></div></div>
@@ -3614,6 +3649,17 @@ main{width:100%;padding:10px 16px 18px}.page-intro{margin:8px 2px 18px}.page-int
 <form id="food-form" hidden><div class="food-line"><label style="margin-top:0">Продукт</label><input name="food_name" maxlength="150" required placeholder="Например: овсяная каша"><div class="row"><div><label>Количество</label><input name="amount_value" class="decimal-input" type="text" inputmode="decimal" required></div><div><label>Единица</label><select name="amount_unit"><option value="г">г</option><option value="мл">мл</option><option value="шт">шт</option><option value="порция">порция</option></select></div></div></div><label>Дата и время</label><input name="consumed_at" type="datetime-local" class="dt"><label>Комментарий <span class="muted">(необязательно)</span></label><textarea name="comment" maxlength="1000"></textarea><button type="button" class="quick-repeat" onclick="repeatLast('food', event)">↻ Повторить последнее</button><p class="last-entry-status muted" id="last-status-food"></p><button type="submit" class="primary-action">Сохранить запись</button><div class="message" id="food-msg"></div></form>
 </div></div>
 <div id="pdf-overlay" hidden><div class="pdf-toolbar"><button type="button" class="pdf-btn" onclick="zoomPdf(-1)">➖</button><span id="zoom-label">100%</span><button type="button" class="pdf-btn" onclick="zoomPdf(1)">➕</button><span class="pdf-title">📄 Медицинский дневник</span><button type="button" class="pdf-btn" onclick="downloadPdf()">⬇️</button><button type="button" class="pdf-btn" onclick="sharePdf()">📤</button><button type="button" class="pdf-btn" onclick="closePdfViewer()">❌</button></div><div id="pdf-pages"></div></div>
+<div id="pdf-type-modal" class="modal" hidden><div class="modal-panel"><div class="modal-grabber"></div><div class="modal-head"><div class="modal-title"><h2>Записи для PDF</h2><p class="muted">Отметьте один или несколько типов</p></div><button type="button" class="close-btn" onclick="closePdfTypeModal()">×</button></div>
+<div class="pdf-type-list">
+<label class="switch-row"><span>🩸 Глюкоза</span><input type="checkbox" class="pdf-type-cb" value="glucose"><span class="switch"></span></label>
+<label class="switch-row"><span>♥ Давление и пульс</span><input type="checkbox" class="pdf-type-cb" value="vitals"><span class="switch"></span></label>
+<label class="switch-row"><span>🌡️ Температура</span><input type="checkbox" class="pdf-type-cb" value="temperature"><span class="switch"></span></label>
+<label class="switch-row"><span>⚖️ Вес</span><input type="checkbox" class="pdf-type-cb" value="weight"><span class="switch"></span></label>
+<label class="switch-row"><span>🍴 Питание</span><input type="checkbox" class="pdf-type-cb" value="food"><span class="switch"></span></label>
+</div>
+<button type="button" class="primary-action" onclick="confirmPdfTypeSelection()">Сформировать PDF</button>
+<p class="message" id="pdf-type-msg"></p>
+</div></div>
 <script>
 (function () {
   // Минимальный аварийный слой интерфейса. Он не зависит от остального JS-бандла:
@@ -3721,6 +3767,19 @@ document.addEventListener('click', function(e) {
   if (typeof t.showPicker !== 'function') return;
   try { t.showPicker(); } catch (err) { /* пикер уже открыт или вызван не из пользовательского жеста — игнорируем */ }
 }, true);
+
+// Регистрация service worker для установки приложения на Android/iOS как
+// PWA (иконка на экране, полноэкранный режим). Полностью необязательна:
+// если /sw.js ещё не размещён на сервере или браузер не поддерживает
+// Service Worker API — просто ничего не произойдёт, остальной функционал
+// приложения не зависит от этого блока.
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', function () {
+    navigator.serviceWorker.register('/sw.js').catch(function () {
+      // Например, файл ещё не выложен в static/ — не мешаем работе приложения.
+    });
+  });
+}
 
 function todayHuman(){var d=new Date();var months=['января','февраля','марта','апреля','мая','июня','июля','августа','сентября','октября','ноября','декабря'];return d.getDate()+' '+months[d.getMonth()]+' '+d.getFullYear();}
 document.getElementById('today-label').textContent='Сегодня, '+todayHuman();
@@ -5311,6 +5370,47 @@ function updateDateLabels() {
           if (Math.abs(currentZoom - renderedZoom) > 0.01) { scheduleRerender(); }
         }
       });
+    }
+
+    function openPdfTypeModal() {
+      var currentType = (document.getElementById('history_type') || {}).value || 'all';
+      var preselect = currentType === 'all' ? null : currentType.split(',');
+      document.querySelectorAll('.pdf-type-cb').forEach(function (cb) {
+        cb.checked = preselect ? (preselect.indexOf(cb.value) !== -1) : true;
+      });
+      setMsg('pdf-type-msg', '', true);
+      document.getElementById('pdf-type-modal').hidden = false;
+      document.body.style.overflow = 'hidden';
+    }
+
+    function closePdfTypeModal() {
+      document.getElementById('pdf-type-modal').hidden = true;
+      document.body.style.overflow = '';
+    }
+
+    document.getElementById('pdf-type-modal').addEventListener('click', function (e) {
+      if (e.target === this) { closePdfTypeModal(); }
+    });
+
+    function confirmPdfTypeSelection() {
+      var selected = Array.prototype.slice.call(document.querySelectorAll('.pdf-type-cb:checked')).map(function (cb) { return cb.value; });
+      if (!selected.length) {
+        setMsg('pdf-type-msg', 'Выберите хотя бы один тип записей', false);
+        return;
+      }
+
+      var allValues = ['glucose', 'vitals', 'temperature', 'weight', 'food'];
+      var typeParam = (selected.length === allValues.length) ? 'all' : selected.join(',');
+
+      var df = document.getElementById('date_from').value;
+      var dt = document.getElementById('date_to').value;
+      var sortInput = document.querySelector('input[name="history_sort"]:checked');
+      var sort = sortInput ? sortInput.value : 'date';
+
+      currentExportUrl = '/export.pdf?date_from=' + encodeURIComponent(df) + '&date_to=' + encodeURIComponent(dt) + '&type=' + encodeURIComponent(typeParam) + '&sort=' + encodeURIComponent(sort);
+
+      closePdfTypeModal();
+      openPdfViewer();
     }
 
     async function openPdfViewer() {

@@ -1,5 +1,14 @@
 {
- "name": "App",
+ "name": "Медицинский дневник",
+ "short_name": "Дневник",
+ "description": "Дневник глюкозы, давления, температуры, веса и питания",
+ "start_url": "/",
+ "scope": "/",
+ "display": "standalone",
+ "orientation": "portrait",
+ "background_color": "#ffffff",
+ "theme_color": "#ffffff",
+ "lang": "ru",
  "icons": [
   {
    "src": "\/android-icon-36x36.png",
@@ -35,7 +44,13 @@
    "src": "\/android-icon-192x192.png",
    "sizes": "192x192",
    "type": "image\/png",
-   "density": "4.0"
+   "density": "4.0",
+   "purpose": "any"
+  },
+  {
+   "src": "\/apple-icon-180x180.png",
+   "sizes": "180x180",
+   "type": "image\/png"
   }
  ]
 }
