@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Медицинский дневник — вход</title>
+  <link rel="apple-touch-icon" sizes="57x57" href="/apple-icon-57x57.png">
+  <link rel="apple-touch-icon" sizes="60x60" href="/apple-icon-60x60.png">
+  <link rel="apple-touch-icon" sizes="72x72" href="/apple-icon-72x72.png">
+  <link rel="apple-touch-icon" sizes="76x76" href="/apple-icon-76x76.png">
+  <link rel="apple-touch-icon" sizes="114x114" href="/apple-icon-114x114.png">
+  <link rel="apple-touch-icon" sizes="120x120" href="/apple-icon-120x120.png">
+  <link rel="apple-touch-icon" sizes="144x144" href="/apple-icon-144x144.png">
+  <link rel="apple-touch-icon" sizes="152x152" href="/apple-icon-152x152.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="/apple-icon-180x180.png">
+  <link rel="icon" type="image/png" sizes="192x192"  href="/android-icon-192x192.png">
+  <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
+  <link rel="icon" type="image/png" sizes="96x96" href="/favicon-96x96.png">
+  <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png">
+  <link rel="manifest" href="/manifest.json">
+  <meta name="msapplication-TileColor" content="#ffffff">
+  <meta name="msapplication-TileImage" content="/ms-icon-144x144.png">
+  <meta name="theme-color" content="#ffffff">
+  <style>
+    *, *::before, *::after {
+      box-sizing: border-box;
+    }
+    html, body {
+      overflow-x: hidden;
+      max-width: 100vw;
+    }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+      background: #f2f2f7;
+      padding-top: env(safe-area-inset-top);
+      padding-right: env(safe-area-inset-right);
+      padding-bottom: env(safe-area-inset-bottom);
+      padding-left: env(safe-area-inset-left);
+      -webkit-text-size-adjust: 100%;
+      overscroll-behavior-x: none;
+    }
+    main {
+      max-width: 430px;
+      margin: 0 auto;
+      padding: 24px;
+    }
+    .card {
+      background: #fff;
+      border-radius: 18px;
+      padding: 20px;
+      margin-top: 32px;
+    }
+    .login-logo {
+      display: block;
+      width: 104px;
+      height: 104px;
+      object-fit: contain;
+      margin: 0 auto 14px;
+      border-radius: 24px;
+    }
+    h1 {
+      font-size: 24px;
+      margin: 0 0 16px;
+    }
+    label {
+      display: block;
+      margin: 12px 0 4px;
+      font-size: 16px;
+      color: #333;
+    }
+    input {
+      width: 100%;
+      min-height: 50px;
+      border-radius: 14px;
+      border: 1px solid #ccc;
+      font-size: 20px;
+      padding: 8px;
+      box-sizing: border-box;
+    }
+    button {
+      width: 100%;
+      min-height: 52px;
+      border: 0;
+      border-radius: 14px;
+      background: #007aff;
+      color: #fff;
+      font-size: 20px;
+      margin-top: 16px;
+    }
+    .error {
+      color: #d70015;
+      margin-bottom: 10px;
+    }
+
+    /* Группа кнопок-переключателей (натощак / после еды) */
+    .button-group {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      margin-top: 6px;
+    }
+    .button-group input[type="radio"] {
+      position: absolute;
+      opacity: 0;
+      pointer-events: none;
+      width: 1px;
+      height: 1px;
+    }
+    .button-group label {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      min-height: 60px;
+      margin: 0;
+      border: 2px solid #d1d1d6;
+      border-radius: 16px;
+      background: #fff;
+      font-size: 18px;
+      font-weight: 500;
+      color: #333;
+      cursor: pointer;
+      user-select: none;
+      -webkit-tap-highlight-color: transparent;
+      transition: background-color 0.15s, border-color 0.15s, color 0.15s;
+      padding: 10px;
+      text-align: center;
+      line-height: 1.2;
+      word-break: break-word;
+    }
+    .button-group label .emoji {
+      font-size: 22px;
+      line-height: 1;
+    }
+    .button-group input[type="radio"]:checked + label {
+      background: #007aff;
+      border-color: #007aff;
+      color: #fff;
+      box-shadow: 0 2px 8px rgba(0,122,255,0.25);
+    }
+    .button-group input[type="radio"]:focus-visible + label {
+      outline: 3px solid rgba(0,122,255,0.4);
+      outline-offset: 2px;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="card">
+      <img src="/logo.jpg" alt="Логотип" class="login-logo">
+      <h1>Медицинский дневник</h1>
+      {% if error %}<div class="error">{{ error }}</div>{% endif %}
+      <form method="post">
+        <label for="username">Логин</label>
+        <input id="username" name="username" autocomplete="username" required>
+        <label for="password">Пароль</label>
+        <input id="password" type="password" name="password" autocomplete="current-password" required>
+        <button type="submit">Войти</button>
+        <button type="button" id="wa-login-btn" hidden onclick="waLogin()">🔐 Войти с биометрией</button>
+        <div class="error" id="wa-login-msg"></div>
+      </form>
+    </div>
+  </main>
+
+  <script>
+    function b64uToBuf(s) {
+      s = s.replace(/-/g, '+').replace(/_/g, '/');
+      while (s.length % 4) s += '=';
+      var bin = atob(s);
+      var buf = new Uint8Array(bin.length);
+      for (var i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+      return buf.buffer;
+    }
+    function bufToB64u(buf) {
+      var b = new Uint8Array(buf);
+      var s = '';
+      for (var i = 0; i < b.length; i++) s += String.fromCharCode(b[i]);
+      return btoa(s).replace(/\\+/g, '-').replace(/\\//g, '_').replace(/=+$/, '');
+    }
+    function biometricName() {
+      var ua = navigator.userAgent;
+      if (/Android/i.test(ua)) return 'отпечатком пальца';
+      var isIOS = /iPhone|iPad|iPod/i.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+      if (isIOS) {
+        var w = Math.min(screen.width, screen.height);
+        var h = Math.max(screen.width, screen.height);
+        if ((w === 320 && h === 568) || (w === 375 && h === 667)) return 'Touch ID';
+        return 'Face ID';
+      }
+      return 'биометрией (Windows Hello / Touch ID)';
+    }
+
+    var WA_STORAGE_KEY = 'medical_diary_wa_credential_id';
+
+    function getStoredCredentialId() {
+      try { return localStorage.getItem(WA_STORAGE_KEY); } catch (e) { return null; }
+    }
+    function clearStoredCredentialId() {
+      try { localStorage.removeItem(WA_STORAGE_KEY); } catch (e) {}
+    }
+
+    (function() {
+      var btn = document.getElementById('wa-login-btn');
+      var storedId = getStoredCredentialId();
+
+      // Показываем кнопку и запускаем автовход ТОЛЬКО если на этом
+      // устройстве вход по биометрии уже был включён в приложении
+      // (сохранён идентификатор ключа после регистрации в настройках).
+      // Наличие Face ID/Touch ID на самом устройстве ещё не означает,
+      // что пользователь включил биометрический вход именно здесь —
+      // раньше кнопка показывалась любому, у кого есть Face ID в iOS,
+      // даже без зарегистрированного ключа.
+      if (!storedId) { return; }
+      if (!window.PublicKeyCredential || !PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable) { return; }
+
+      PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable().then(function(av) {
+        if (av) {
+          btn.textContent = '🔐 Войти: ' + biometricName();
+          btn.hidden = false;
+          // Автоматический запуск сразу при открытии страницы, без
+          // нажатия кнопки. Safari (и другие современные браузеры)
+          // разрешают один вызов navigator.credentials.get() без жеста
+          // пользователя на каждую навигацию — именно для такого
+          // сценария. Кнопка остаётся видимой как запасной вариант для
+          // ручного повтора.
+          waLogin(true);
+        }
+      }).catch(function() {});
+    })();
+
+    async function waLogin(silent) {
+      try {
+        var res = await fetch('/api/webauthn/login/options', { method: 'POST' });
+        var opts = await res.json();
+        if (!res.ok) throw new Error(opts.error || 'HTTP ' + res.status);
+        opts.challenge = b64uToBuf(opts.challenge);
+
+        var storedId = getStoredCredentialId();
+        if (storedId) {
+          // Явно указываем конкретный ключ этого устройства. Тогда
+          // браузер/ОС находит его локально и сразу переходит к
+          // разблокировке (Face ID/Touch ID) — без системного экрана
+          // выбора "Использовать ключ входа / Другие параметры", который
+          // иначе показывается при "безымянном" запросе без allowCredentials.
+          opts.allowCredentials = [{ id: b64uToBuf(storedId), type: 'public-key' }];
+        } else if (opts.allowCredentials) {
+          opts.allowCredentials = opts.allowCredentials.map(function(c) { c.id = b64uToBuf(c.id); return c; });
+        }
+
+        var cred = await navigator.credentials.get({ publicKey: opts });
+        var res2 = await fetch('/api/webauthn/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            id: cred.id,
+            rawId: bufToB64u(cred.rawId),
+            type: cred.type,
+            response: {
+              authenticatorData: bufToB64u(cred.response.authenticatorData),
+              clientDataJSON: bufToB64u(cred.response.clientDataJSON),
+              signature: bufToB64u(cred.response.signature),
+              userHandle: cred.response.userHandle ? bufToB64u(cred.response.userHandle) : null
+            }
+          })
+        });
+        var out = await res2.json();
+        if (!res2.ok) {
+          if (res2.status === 404) {
+            // Сервер не знает такой ключ (например, вход по биометрии
+            // был отключён) — локальная подсказка устарела, чистим её.
+            clearStoredCredentialId();
+          }
+          throw new Error(out.error || 'HTTP ' + res2.status);
+        }
+        window.location = '/';
+      } catch (err) {
+        // В "тихом" автозапуске ничего не показываем: пользователь мог
+        // отменить системный диалог, или ключ не подошёл — это штатная
+        // ситуация, а не ошибка. Форма логина/пароля остаётся доступной.
+        // При ручном нажатии кнопки (silent не передан) ошибку показываем,
+        // чтобы пользователь понимал, что пошло не так.
+        console.log('WebAuthn login attempt failed:', err && err.message);
+        if (!silent) {
+          var el = document.getElementById('wa-login-msg');
+          el.textContent = friendlyErrorMessage(err);
+        }
+      }
+    }
+  </script>
+</body>
+</html>
