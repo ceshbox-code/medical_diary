@@ -11,6 +11,18 @@ log() { printf '\n[medical-diary] %s\n' "$*"; }
 warn() { printf '\n[medical-diary] WARNING: %s\n' "$*" >&2; }
 die() { printf '\n[medical-diary] ERROR: %s\n' "$*" >&2; exit 1; }
 
+# The installer is normally started as `curl ... | sh`, so stdin belongs to
+# the shell script itself. Interactive input must therefore be read from the
+# controlling terminal, not from stdin.
+read_tty() {
+    _answer=""
+    if [ ! -r /dev/tty ]; then
+        die "Не удалось открыть /dev/tty для интерактивного ввода. Запустите скрипт из интерактивной SSH-сессии."
+    fi
+    IFS= read -r _answer < /dev/tty || true
+    printf '%s' "$_answer"
+}
+
 prompt() {
     _prompt="$1"
     _default="${2:-}"
@@ -19,11 +31,7 @@ prompt() {
     else
         printf '%s: ' "$_prompt" >&2
     fi
-    IFS= read -r _answer || true
-    if [ -z "$_answer" ]; then
-        _answer="$_default"
-    fi
-    printf '%s' "$_answer"
+    read_tty
 }
 
 confirm() {
@@ -34,7 +42,7 @@ confirm() {
         *) _suffix="[y/N]" ;;
     esac
     printf '%s %s: ' "$_prompt" "$_suffix" >&2
-    IFS= read -r _answer || true
+    _answer=$(read_tty)
     _answer=$(printf '%s' "$_answer" | tr '[:upper:]' '[:lower:]')
     if [ -z "$_answer" ]; then
         _answer="$_default"
@@ -78,11 +86,11 @@ require_cmd() {
 
 [ "$(id -u)" -eq 0 ] || die "Запустите скрипт от root (SSH на Synology: sudo -i, затем повторите)."
 
-require_cmd git "Не найден git. Установите Git Server/Git через Package Center."
 require_cmd openssl "Не найден openssl."
 require_cmd curl "Не найден curl."
 require_cmd sed "Не найден sed."
 require_cmd awk "Не найден awk."
+require_cmd find "Не найден find."
 
 if command -v docker >/dev/null 2>&1; then
     DOCKER="docker"
@@ -151,7 +159,11 @@ confirm "Продолжить?" "y" || die "Установка отменена.
 PARENT_DIR=$(dirname "$INSTALL_DIR")
 mkdir -p "$PARENT_DIR"
 
+# Git is preferred for updating an existing checkout, but it is not required
+# for a fresh installation. This makes the installer usable on DSM systems
+# where Git is not installed or is not present in PATH.
 if [ -e "$INSTALL_DIR/.git" ]; then
+    require_cmd git "Найден существующий Git-репозиторий, но команда git недоступна. Установите Git или удалите только незавершённую установку после проверки данных."
     log "Обновляю существующий репозиторий: $INSTALL_DIR"
     if ! git -C "$INSTALL_DIR" diff --quiet || ! git -C "$INSTALL_DIR" diff --cached --quiet; then
         die "В репозитории есть незакоммиченные изменения. Ничего не перезаписываю; сохраните изменения или уберите их и повторите."
@@ -164,11 +176,23 @@ elif [ -e "$INSTALL_DIR" ]; then
         die "Каталог уже существует и не является git-репозиторием: $INSTALL_DIR. Ничего не удалено."
     fi
     rmdir "$INSTALL_DIR"
-    log "Каталог пустой — клонирую репозиторий"
-    git clone --branch "$BRANCH" --single-branch "$REPO_URL" "$INSTALL_DIR"
+    log "Каталог пустой — скачиваю архив репозитория"
+    TMP_ARCHIVE="$(mktemp /tmp/medical_diary.XXXXXX.tar.gz)"
+    trap 'rm -f "$TMP_ARCHIVE"' EXIT HUP INT TERM
+    curl -fsSL "https://github.com/ceshbox-code/medical_diary/archive/refs/heads/$BRANCH.tar.gz" -o "$TMP_ARCHIVE" || die "Не удалось скачать репозиторий GitHub."
+    mkdir -p "$INSTALL_DIR"
+    tar -xzf "$TMP_ARCHIVE" -C "$INSTALL_DIR" --strip-components=1 || die "Не удалось распаковать репозиторий."
+    rm -f "$TMP_ARCHIVE"
+    trap - EXIT HUP INT TERM
 else
-    log "Клонирую репозиторий в $INSTALL_DIR"
-    git clone --branch "$BRANCH" --single-branch "$REPO_URL" "$INSTALL_DIR"
+    log "Скачиваю архив репозитория"
+    TMP_ARCHIVE="$(mktemp /tmp/medical_diary.XXXXXX.tar.gz)"
+    trap 'rm -f "$TMP_ARCHIVE"' EXIT HUP INT TERM
+    curl -fsSL "https://github.com/ceshbox-code/medical_diary/archive/refs/heads/$BRANCH.tar.gz" -o "$TMP_ARCHIVE" || die "Не удалось скачать репозиторий GitHub."
+    mkdir -p "$INSTALL_DIR"
+    tar -xzf "$TMP_ARCHIVE" -C "$INSTALL_DIR" --strip-components=1 || die "Не удалось распаковать репозиторий."
+    rm -f "$TMP_ARCHIVE"
+    trap - EXIT HUP INT TERM
 fi
 
 cd "$INSTALL_DIR"
@@ -209,8 +233,6 @@ if [ ! -f .env ]; then
 else
     log ".env уже существует — секреты не меняю."
 
-    # Обновляем только сетевые параметры, которые пользователь явно выбрал.
-    # Остальные настройки (GigaChat, backup, admin и т.д.) сохраняются.
     if grep -q '^HTTP_PORT=' .env; then
         sed -i "s|^HTTP_PORT=.*$|HTTP_PORT=$HTTP_PORT|" .env
     else
