@@ -7,10 +7,18 @@ services:
       - .env
     ports:
       - "${HTTP_PORT:-8000}:8000"
+    
     volumes:
       - ./data:/data
       - ./backups:/backups
       - ./static:/app/static:ro
+      - ./templates:/app/templates:ro
+      - ./app.py:/app/app.py:ro
+      - ./validators.py:/app/validators.py:ro
+      - ./ai_utils.py:/app/ai_utils.py:ro
+      - ./db.py:/app/db.py:ro
+      - ./security.py:/app/security.py:ro
+
     healthcheck:
       test:
         [

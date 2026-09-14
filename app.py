@@ -37,6 +37,41 @@ from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 from reportlab.lib.styles import ParagraphStyle
 
+from validators import (
+    UNIT_RU,
+    unit_ru,
+    DEFAULT_RANGES,
+    MONTHS_RU_SHORT,
+    now_local,
+    parse_dt,
+    parse_iso_date,
+    parse_float,
+    parse_int,
+    format_dt_ru,
+)
+from ai_utils import (
+    _ai_ranges_payload,
+    _ai_input_hash,
+    _ai_blocked_by_safety_override,
+)
+from db import DATABASE, SCHEMA, get_db, close_db, init_db
+from security import (
+    audit,
+    LOGIN_MAX_ATTEMPTS,
+    LOGIN_LOCK_MINUTES,
+    throttle_key_for,
+    is_login_locked,
+    register_login_failure,
+    clear_login_failures,
+    get_idempotent_response,
+    store_idempotent_response,
+    wants_json_response,
+    login_required,
+    admin_required,
+    csrf_protect,
+    security_headers,
+)
+
 try:
     from webauthn import (
         generate_registration_options,
@@ -87,8 +122,6 @@ except Exception as _wa_import_error:
     WA_AVAILABLE = False
     print("WebAuthn import error:", repr(_wa_import_error), flush=True)
 
-DATABASE = os.getenv("DATABASE_PATH", "/data/medical_diary.db")
-
 FONT_CANDIDATES = [
     os.getenv("FONT_PATH", ""),
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
@@ -125,35 +158,12 @@ app.config.update(
 )
 app.permanent_session_lifetime = timedelta(days=int(os.getenv("SESSION_LIFETIME_DAYS", "30")))
 
+# csrf_protect/security_headers/close_db теперь определены в security.py/db.py
+# (не создают объект Flask-приложения сами), поэтому регистрируются здесь.
+app.teardown_appcontext(close_db)
+app.before_request(csrf_protect)
+app.after_request(security_headers)
 
-UNIT_RU = {
-    # Старые значения, которые могли сохраниться в БД.
-    "g": "г", "gram": "г", "grams": "г",
-    "kg": "кг", "kilogram": "кг", "kilograms": "кг",
-    "mg": "мг", "milligram": "мг", "milligrams": "мг",
-    "mcg": "мкг", "µg": "мкг",
-    "ml": "мл", "milliliter": "мл", "milliliters": "мл",
-    "l": "л", "liter": "л", "liters": "л",
-    "pcs": "шт", "pc": "шт", "piece": "шт", "pieces": "шт",
-    "portion": "порция", "portions": "порция",
-    # Русские значения уже корректны — оставляем их неизменными.
-    "г": "г", "кг": "кг", "мг": "мг", "мкг": "мкг",
-    "мл": "мл", "л": "л", "шт": "шт", "порция": "порция",
-}
-
-def unit_ru(value):
-    """Возвращает безопасное русское обозначение единицы продукта."""
-    key = str(value or "").strip()
-    return UNIT_RU.get(key, key)
-
-DEFAULT_RANGES = {
-    "glucose_fasting": (3.3, 5.5),
-    "glucose_post": (3.3, 7.8),
-    "systolic": (90, 120),
-    "diastolic": (60, 80),
-    "pulse": (60, 100),
-}
-REF_RANGES = DEFAULT_RANGES  # используется как запасной вариант, если у пользователя нет своих границ
 
 STATUS_COLORS = {"low": "#fff3c4", "ok": "#d9f2d9", "high": "#fbd9d9"}
 STATUS_ICON = {"low": "\u25bc", "ok": "", "high": "\u25b2"}  # ▼ ниже / (без иконки) норма / ▲ выше
@@ -201,8 +211,6 @@ def get_user_settings(user_id):
         except Exception:
             pass
     return settings, ranges
-
-
 
 
 def glucose_assessment(value_mmol_l, glucose_type, ranges=None):
@@ -342,7 +350,6 @@ def weight_assessment():
         "Оценивайте динамику веса вместе с врачом; отдельное значение не является нормой или отклонением.",
         "ok",
     )
-
 
 
 GIGACHAT_AI_ENABLED = os.getenv("GIGACHAT_AI_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
@@ -496,54 +503,6 @@ def _ai_entry_context(entry, index):
         })
 
     return result
-
-
-def _ai_ranges_payload(ranges):
-    """Единый набор справочных диапазонов, отправляемых в GigaChat.
-
-    Вынесено в отдельную функцию, чтобы ХЭШ кэша (см. _ai_input_hash) и
-    сам запрос к модели гарантированно использовали одни и те же данные —
-    иначе кэш мог бы считаться валидным, даже если реальные диапазоны,
-    отправленные модели в прошлый раз, отличались.
-    """
-    return {
-        "glucose_fasting_mmol_l": list(ranges.get("glucose_fasting", DEFAULT_RANGES["glucose_fasting"])),
-        "glucose_post_mmol_l": list(ranges.get("glucose_post", DEFAULT_RANGES["glucose_post"])),
-        "systolic_mmhg": list(ranges.get("systolic", DEFAULT_RANGES["systolic"])),
-        "diastolic_mmhg": list(ranges.get("diastolic", DEFAULT_RANGES["diastolic"])),
-        "pulse_bpm": list(ranges.get("pulse", DEFAULT_RANGES["pulse"])),
-        "temperature_c": [35.0, 37.0],
-    }
-
-
-def _ai_input_hash(context, ranges_payload):
-    """Хэш входных данных, отправляемых в GigaChat для одной записи.
-
-    Используется как ключ кэша (ai_assessment_cache.input_hash): пока
-    значение, тип, дата/время записи и используемые диапазоны не
-    изменились — повторный запрос к модели не нужен, берётся сохранённый
-    текст. Комментарии и ID записи в хэш не входят, т.к. они и так не
-    передаются модели (см. _ai_entry_context).
-    """
-    ctx = dict(context)
-    ctx.pop("index", None)
-    blob = json.dumps(
-        {"entry": ctx, "ranges": ranges_payload},
-        ensure_ascii=False, sort_keys=True, separators=(",", ":"),
-    )
-    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
-
-
-def _ai_blocked_by_safety_override(entry):
-    """Записи с критическим давлением всегда получают встроенную
-    экстренную формулировку — ни свежая, ни закэшированная оценка ИИ их
-    не заменяет, поэтому такие записи в AI-обработку не отправляются."""
-    if entry.get("type") == "vitals":
-        try:
-            return int(entry.get("systolic_mmhg")) >= 180 or int(entry.get("diastolic_mmhg")) >= 120
-        except (TypeError, ValueError):
-            return False
-    return False
 
 
 def _gigachat_generate_assessments(candidates, ranges_payload, enabled=True):
@@ -826,212 +785,6 @@ def add_assessments(entries, ranges=None):
 
     return entries
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS users (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  username TEXT NOT NULL UNIQUE,
-  password_hash TEXT NOT NULL,
-  display_name TEXT,
-  status TEXT NOT NULL DEFAULT 'active',
-  is_admin INTEGER NOT NULL DEFAULT 0,
-  settings_json TEXT,
-  created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
-CREATE TABLE IF NOT EXISTS glucose_entries (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  measured_at TEXT NOT NULL,
-  glucose_type TEXT NOT NULL CHECK (glucose_type IN ('fasting', 'post_meal')),
-  value_mmol_l REAL NOT NULL CHECK (value_mmol_l BETWEEN 0.1 AND 100.0),
-  comment TEXT,
-  source TEXT NOT NULL DEFAULT 'manual',
-  created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-  deleted_at TEXT
-);
-
-CREATE INDEX IF NOT EXISTS idx_glucose_user_time ON glucose_entries(user_id, measured_at);
-
-CREATE TABLE IF NOT EXISTS blood_pressure_entries (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  measured_at TEXT NOT NULL,
-  systolic_mmhg INTEGER NOT NULL CHECK (systolic_mmhg BETWEEN 30 AND 400),
-  diastolic_mmhg INTEGER NOT NULL CHECK (diastolic_mmhg BETWEEN 10 AND 300),
-  pulse_bpm INTEGER CHECK (pulse_bpm IS NULL OR pulse_bpm BETWEEN 20 AND 300),
-  comment TEXT,
-  source TEXT NOT NULL DEFAULT 'manual',
-  created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-  deleted_at TEXT,
-  CHECK (systolic_mmhg > diastolic_mmhg)
-);
-
-CREATE INDEX IF NOT EXISTS idx_bp_user_time ON blood_pressure_entries(user_id, measured_at);
-
-CREATE TABLE IF NOT EXISTS food_entries (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  food_name TEXT NOT NULL,
-  consumed_at TEXT NOT NULL,
-  amount_value REAL NOT NULL CHECK (amount_value > 0),
-  amount_unit TEXT NOT NULL,
-  comment TEXT,
-  source TEXT NOT NULL DEFAULT 'manual',
-  created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-  deleted_at TEXT
-);
-
-CREATE INDEX IF NOT EXISTS idx_food_user_time ON food_entries(user_id, consumed_at);
-
-CREATE TABLE IF NOT EXISTS temperature_entries (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  measured_at TEXT NOT NULL,
-  temperature_c REAL NOT NULL,
-  comment TEXT,
-  source TEXT NOT NULL DEFAULT 'manual',
-  created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-  deleted_at TEXT
-);
-
-CREATE INDEX IF NOT EXISTS idx_temperature_user_time ON temperature_entries(user_id, measured_at);
-
-CREATE TABLE IF NOT EXISTS weight_entries (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  measured_at TEXT NOT NULL,
-  weight_kg REAL NOT NULL CHECK (weight_kg BETWEEN 1.0 AND 500.0),
-  comment TEXT,
-  source TEXT NOT NULL DEFAULT 'manual',
-  created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-  deleted_at TEXT
-);
-
-CREATE INDEX IF NOT EXISTS idx_weight_user_time ON weight_entries(user_id, measured_at);
-
-CREATE TABLE IF NOT EXISTS audit_log (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  user_id INTEGER,
-  action TEXT NOT NULL,
-  entity_type TEXT,
-  entity_id INTEGER,
-  ip_address TEXT,
-  user_agent TEXT,
-  details_json TEXT,
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
-CREATE TABLE IF NOT EXISTS login_throttle (
-  throttle_key TEXT PRIMARY KEY,
-  fail_count INTEGER NOT NULL DEFAULT 0,
-  locked_until TEXT,
-  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
-CREATE TABLE IF NOT EXISTS idempotency_keys (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  endpoint TEXT NOT NULL,
-  idempotency_key TEXT NOT NULL,
-  entity_type TEXT,
-  entity_id INTEGER,
-  response_json TEXT NOT NULL,
-  created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  UNIQUE (user_id, endpoint, idempotency_key)
-);
-
--- Кэш ИИ-оценок (GigaChat) по каждой записи дневника. input_hash — хэш
--- ровно тех данных, что отправляются модели (значение, тип, дата/время
--- записи + справочные диапазоны). Пока хэш совпадает — запрос к GigaChat
--- повторно не делается, при экспорте PDF используется сохранённый текст.
--- Если пользователь изменит запись или свои диапазоны, хэш изменится, и
--- при следующем экспорте оценка будет сгенерирована заново автоматически.
-CREATE TABLE IF NOT EXISTS ai_assessment_cache (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  entry_type TEXT NOT NULL,
-  entry_id INTEGER NOT NULL,
-  input_hash TEXT NOT NULL,
-  assessment TEXT NOT NULL,
-  recommendation TEXT NOT NULL,
-  model TEXT,
-  created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-  UNIQUE (user_id, entry_type, entry_id)
-);
-
-CREATE TABLE IF NOT EXISTS webauthn_credentials (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  credential_id BLOB NOT NULL UNIQUE,
-  public_key BLOB NOT NULL,
-  sign_count INTEGER NOT NULL DEFAULT 0,
-  rp_id TEXT NOT NULL,
-  origin TEXT NOT NULL,
-  created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  last_used_at TEXT
-);
-"""
-
-
-def get_db():
-    if "db" not in g:
-        g.db = sqlite3.connect(DATABASE)
-        g.db.row_factory = sqlite3.Row
-        g.db.execute("PRAGMA foreign_keys = ON")
-        g.db.execute("PRAGMA journal_mode = WAL")
-    return g.db
-
-
-@app.teardown_appcontext
-def close_db(exception=None):
-    db = g.pop("db", None)
-    if db is not None:
-        db.close()
-
-
-def init_db():
-    os.makedirs(os.path.dirname(DATABASE), exist_ok=True)
-    conn = sqlite3.connect(DATABASE)
-    conn.executescript(SCHEMA)
-    conn.execute("PRAGMA journal_mode = WAL")
-
-    cols = [r[1] for r in conn.execute("PRAGMA table_info(users)").fetchall()]
-    if "is_admin" not in cols:
-        conn.execute("ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0")
-    if "settings_json" not in cols:
-        conn.execute("ALTER TABLE users ADD COLUMN settings_json TEXT")
-
-    # Пользователь из ADMIN_USERNAME всегда получает права администратора
-    # при каждом старте приложения. Это намеренный механизм восстановления
-    # доступа (например, если admin-флаг был случайно снят), а не ошибка —
-    # но учитывайте это при ротации ADMIN_USERNAME в окружении.
-    conn.execute(
-        "UPDATE users SET is_admin = 1 WHERE username = ?",
-        (os.getenv("ADMIN_USERNAME", "admin"),),
-    )
-
-    username = os.getenv("ADMIN_USERNAME", "admin")
-    password = os.getenv("ADMIN_PASSWORD")
-
-    if username and password:
-        try:
-            conn.execute(
-                "INSERT INTO users (username, password_hash, display_name, status) VALUES (?, ?, ?, ?)",
-                (username, generate_password_hash(password), username, "active"),
-            )
-        except sqlite3.IntegrityError:
-            pass
-
-    conn.commit()
-    conn.close()
-
 
 init_db()
 
@@ -1298,223 +1051,6 @@ if BACKUP_ENABLED:
     threading.Thread(target=backup_scheduler_loop, daemon=True).start()
 else:
     print("[backup] Автобэкап отключён (BACKUP_ENABLED=false)", flush=True)
-
-
-def now_local():
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-
-def parse_dt(value):
-    if value is None or str(value).strip() == "":
-        return now_local()
-
-    value = str(value).strip().replace("T", " ")
-
-    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
-        try:
-            return datetime.strptime(value, fmt).strftime("%Y-%m-%d %H:%M:%S")
-        except ValueError:
-            pass
-
-    raise ValueError("Некорректная дата/время")
-
-
-def parse_float(value, min_value, max_value, field_name="Значение"):
-    if value is None or str(value).strip() == "":
-        raise ValueError(f"{field_name}: введите число")
-
-    try:
-        result = float(str(value).strip().replace(",", "."))
-    except Exception:
-        raise ValueError(f"{field_name}: введите число")
-
-    if result < min_value or result > max_value:
-        raise ValueError(f"{field_name}: допустимый диапазон {min_value}-{max_value}")
-
-    return result
-
-
-def parse_int(value, min_value, max_value, field_name="Значение", required=True):
-    if value is None or str(value).strip() == "":
-        if required:
-            raise ValueError(f"{field_name}: введите число")
-        return None
-
-    try:
-        result = int(str(value).strip())
-    except Exception:
-        raise ValueError(f"{field_name}: введите целое число")
-
-    if result < min_value or result > max_value:
-        raise ValueError(f"{field_name}: допустимый диапазон {min_value}-{max_value}")
-
-    return result
-
-
-def parse_iso_date(value, default_date):
-    if value is None or str(value).strip() == "":
-        return default_date
-
-    try:
-        return date.fromisoformat(str(value).strip())
-    except ValueError:
-        raise ValueError("Некорректная дата")
-
-
-def audit(action, entity_type=None, entity_id=None, details=None):
-    try:
-        db = get_db()
-        db.execute(
-            "INSERT INTO audit_log (user_id, action, entity_type, entity_id, ip_address, user_agent, details_json) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (
-                session.get("user_id"),
-                action,
-                entity_type,
-                entity_id,
-                request.remote_addr,
-                request.headers.get("User-Agent", "")[:255],
-                json.dumps(details or {}, ensure_ascii=False),
-            ),
-        )
-        db.commit()
-    except Exception:
-        pass
-
-
-LOGIN_MAX_ATTEMPTS = int(os.getenv("LOGIN_MAX_ATTEMPTS", "5"))
-LOGIN_LOCK_MINUTES = int(os.getenv("LOGIN_LOCK_MINUTES", "15"))
-
-
-def throttle_key_for(username):
-    # Ключ объединяет логин и IP: один заблокированный логин с одного IP
-    # не блокирует того же пользователя при входе с другого адреса,
-    # но не даёт перебирать пароли ни по логину, ни по IP отдельно.
-    ip = request.headers.get("X-Forwarded-For", request.remote_addr or "").split(",")[0].strip()
-    return f"{(username or '').strip().lower()}|{ip}"
-
-
-def is_login_locked(key):
-    db = get_db()
-    row = db.execute(
-        "SELECT locked_until FROM login_throttle WHERE throttle_key = ?", (key,)
-    ).fetchone()
-    if not row or not row["locked_until"]:
-        return False
-    return row["locked_until"] > now_local()
-
-
-def register_login_failure(key):
-    db = get_db()
-    row = db.execute(
-        "SELECT fail_count FROM login_throttle WHERE throttle_key = ?", (key,)
-    ).fetchone()
-    fail_count = (row["fail_count"] if row else 0) + 1
-    locked_until = None
-    if fail_count >= LOGIN_MAX_ATTEMPTS:
-        locked_until = (datetime.now() + timedelta(minutes=LOGIN_LOCK_MINUTES)).strftime("%Y-%m-%d %H:%M:%S")
-        fail_count = 0
-    db.execute(
-        """
-        INSERT INTO login_throttle (throttle_key, fail_count, locked_until, updated_at)
-        VALUES (?, ?, ?, datetime('now'))
-        ON CONFLICT(throttle_key) DO UPDATE SET
-          fail_count = excluded.fail_count,
-          locked_until = excluded.locked_until,
-          updated_at = datetime('now')
-        """,
-        (key, fail_count, locked_until),
-    )
-    db.commit()
-
-
-def clear_login_failures(key):
-    db = get_db()
-    db.execute("DELETE FROM login_throttle WHERE throttle_key = ?", (key,))
-    db.commit()
-
-
-def get_idempotent_response(user_id, endpoint, idem_key):
-    if not idem_key:
-        return None
-    db = get_db()
-    row = db.execute(
-        "SELECT response_json FROM idempotency_keys WHERE user_id = ? AND endpoint = ? AND idempotency_key = ?",
-        (user_id, endpoint, idem_key),
-    ).fetchone()
-    return json.loads(row["response_json"]) if row else None
-
-
-def store_idempotent_response(user_id, endpoint, idem_key, entity_type, entity_id, response_payload):
-    if not idem_key:
-        return
-    db = get_db()
-    try:
-        db.execute(
-            "INSERT INTO idempotency_keys (user_id, endpoint, idempotency_key, entity_type, entity_id, response_json) VALUES (?, ?, ?, ?, ?, ?)",
-            (user_id, endpoint, idem_key, entity_type, entity_id, json.dumps(response_payload)),
-        )
-        db.commit()
-    except sqlite3.IntegrityError:
-        # Параллельный повтор того же запроса — уже сохранено другим потоком/запросом, это ок.
-        db.rollback()
-
-
-def wants_json_response():
-    return request.path.startswith("/api/") or request.path == "/export.pdf"
-
-
-def login_required(f):
-    @wraps(f)
-    def wrapper(*args, **kwargs):
-        if "user_id" not in session:
-            if wants_json_response():
-                return jsonify(error="Требуется вход"), 401
-            return redirect(url_for("login"))
-
-        # Перепроверяем статус пользователя в БД на каждый запрос, чтобы
-        # деактивация (в т.ч. через admin_delete_user) немедленно
-        # прекращала доступ, а не только для новых входов в систему.
-        db = get_db()
-        row = db.execute("SELECT status FROM users WHERE id = ?", (session["user_id"],)).fetchone()
-        if not row or row["status"] != "active":
-            session.clear()
-            if wants_json_response():
-                return jsonify(error="Учётная запись недоступна"), 401
-            return redirect(url_for("login"))
-
-        return f(*args, **kwargs)
-
-    return wrapper
-
-
-@app.before_request
-def csrf_protect():
-    if request.method in ("POST", "DELETE", "PUT", "PATCH") and request.path not in ("/login", "/api/webauthn/login/options", "/api/webauthn/login"):
-        token = request.headers.get("X-CSRF-Token")
-
-        if not token and request.is_json:
-            data = request.get_json(silent=True) or {}
-            token = data.get("csrf_token")
-
-        session_token = session.get("csrf_token")
-        if not session_token or not token or not secrets.compare_digest(str(token), str(session_token)):
-            abort(403)
-
-
-@app.after_request
-def security_headers(response):
-    response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["X-Frame-Options"] = "DENY"
-    response.headers["Referrer-Policy"] = "same-origin"
-    if app.config.get("SESSION_COOKIE_SECURE"):
-        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
-    response.headers["Content-Security-Policy"] = (
-        "default-src 'self'; "
-        "script-src 'self' 'unsafe-inline'; "
-        "style-src 'self' 'unsafe-inline'; "
-        "img-src 'self' data:;"
-    )
-    return response
 
 
 @app.get("/health")
@@ -2136,17 +1672,6 @@ def format_day_ru(day_str):
         return day_str
 
 
-MONTHS_RU_SHORT = ["янв.", "февр.", "мар.", "апр.", "мая", "июня", "июля", "авг.", "сент.", "окт.", "нояб.", "дек."]
-
-def format_dt_ru(value):
-    try:
-        s = str(value)
-        d = date.fromisoformat(s[:10])
-        t = s[11:16]
-        return f"{d.day:02d} {MONTHS_RU_SHORT[d.month - 1]} {d.year % 100:02d} г. {t}"
-    except Exception:
-        return str(value)
-
 def build_pdf(entries, d_from, d_to, sort="date", filter_label="Все записи", owner_name="", ai_used=False):
     buffer = BytesIO()
 
@@ -2350,23 +1875,6 @@ def export_pdf():
     )
 
 
-def admin_required(f):
-    @wraps(f)
-    def wrapper(*args, **kwargs):
-        if "user_id" not in session:
-            return jsonify(error="Требуется вход"), 401
-        if not session.get("is_admin"):
-            return jsonify(error="Недостаточно прав"), 403
-        db = get_db()
-        row = db.execute("SELECT status FROM users WHERE id = ?", (session["user_id"],)).fetchone()
-        if not row or row["status"] != "active":
-            session.clear()
-            return jsonify(error="Учётная запись недоступна"), 401
-        return f(*args, **kwargs)
-
-    return wrapper
-
-
 @app.get("/api/admin/backups")
 @admin_required
 def admin_list_backups():
@@ -2401,7 +1909,6 @@ def admin_run_backup():
         return jsonify(error="Не удалось создать резервную копию — подробности в логах сервера"), 500
     audit("manual_backup", "backups", None, {"file": os.path.basename(path)})
     return jsonify(ok=True, file=os.path.basename(path))
-
 
 
 @app.post("/api/admin/backups/restore")
