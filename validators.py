@@ -111,3 +111,11 @@ def format_dt_ru(value):
         return f"{d.day:02d} {MONTHS_RU_SHORT[d.month - 1]} {d.year % 100:02d} г. {t}"
     except Exception:
         return str(value)
+
+
+def status_of(value, low, high):
+    if value < low:
+        return "low"
+    if value > high:
+        return "high"
+    return "ok"

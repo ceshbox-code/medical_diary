@@ -19,6 +19,10 @@ services:
       - ./db.py:/app/db.py:ro
       - ./security.py:/app/security.py:ro
 
+      - ./assessments.py:/app/assessments.py:ro
+      - ./pdf_export.py:/app/pdf_export.py:ro
+      - ./backup.py:/app/backup.py:ro
+
     healthcheck:
       test:
         [
