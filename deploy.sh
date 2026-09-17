@@ -93,6 +93,12 @@ die() {
     exit 1
 }
 
+pause() {
+    echo
+    printf '%b' "${CYAN}Нажмите Enter, чтобы продолжить...${NC}"
+    read -r _ || true
+}
+
 ask_yes_no() {
     local prompt="$1"
     local answer
@@ -120,42 +126,49 @@ command_exists() {
 }
 
 # ------------------------------------------------------------
-# Вывод информации о путях
+# Рамки интерфейса
 # ------------------------------------------------------------
-section_title() {
-    local title="$1"
-    echo
-    printf '%b\n' "${BOLD}${CYAN}┌────────────────────────────────────────────────────────────┐${NC}"
-    box_line " ${BOLD}${title}${NC}"
-    printf '%b\n' "${BOLD}${CYAN}└────────────────────────────────────────────────────────────┘${NC}"
-}
+FRAME_WIDTH=60
 
-# Печать строки внутри рамки фиксированной ширины.
-# Длина считается без ANSI escape-последовательностей, поэтому
-# цвет текста не влияет на положение правой границы.
 box_line() {
     local text="$1"
-    local width=60
-    local plain len pad
+    local plain="${2:-$1}"
+    local len
+    local pad
 
-    plain="$(printf '%b' "$text" | sed $'s/\\033\\[[0-9;]*m//g')"
     len=${#plain}
-    pad=$((width - len))
-    (( pad < 0 )) && pad=0
+    pad=$((FRAME_WIDTH - len))
 
-    printf '%b%*s%b\n' \
-        "${CYAN}│${NC}${text}" "$pad" '' "${CYAN}│${NC}"
+    # Если ширина не совпадает из-за локали/кодировки,
+    # не ломаем интерфейс, а просто не добавляем отступ.
+    if (( pad < 0 )); then
+        pad=0
+    fi
+
+    printf '%b' "${CYAN}│${NC}"
+    printf '%b' "$text"
+    printf '%*s' "$pad" ''
+    printf '%b\n' "${CYAN}│${NC}"
+}
+
+section_title() {
+    local title="$1"
+
+    echo
+    printf '%b\n' "${BOLD}${CYAN}┌────────────────────────────────────────────────────────────┐${NC}"
+    box_line " ${BOLD}${title}${NC}" " ${title}"
+    printf '%b\n' "${BOLD}${CYAN}└────────────────────────────────────────────────────────────┘${NC}"
 }
 
 show_paths_info() {
     echo
     printf '%b\n' "${CYAN}┌────────────────────────────────────────────────────────────┐${NC}"
-    box_line " ${BOLD}${MAGENTA}ОКРУЖЕНИЕ${NC}"
+    box_line " ${BOLD}${MAGENTA}ОКРУЖЕНИЕ${NC}" " ОКРУЖЕНИЕ"
     printf '%b\n' "${CYAN}├────────────────────────────────────────────────────────────┤${NC}"
-    box_line " ${MAGENTA}Проект :${NC} ${PROJECT_DIR}"
-    box_line " ${MAGENTA}Git    :${NC} ${GIT_DIR}"
-    box_line " ${MAGENTA}GitHub :${NC} ${GITHUB_URL}"
-    box_line " ${MAGENTA}Ветка  :${NC} ${GITHUB_BRANCH}"
+    box_line " ${MAGENTA}Проект :${NC} ${PROJECT_DIR}" " Проект : ${PROJECT_DIR}"
+    box_line " ${MAGENTA}Git    :${NC} ${GIT_DIR}" " Git    : ${GIT_DIR}"
+    box_line " ${MAGENTA}GitHub :${NC} ${GITHUB_URL}" " GitHub : ${GITHUB_URL}"
+    box_line " ${MAGENTA}Ветка  :${NC} ${GITHUB_BRANCH}" " Ветка  : ${GITHUB_BRANCH}"
     printf '%b\n' "${CYAN}└────────────────────────────────────────────────────────────┘${NC}"
     echo
 }
@@ -165,6 +178,7 @@ show_paths_info() {
 # ------------------------------------------------------------
 check_dependencies() {
     command_exists git || die "Git не найден."
+    command_exists tar || die "tar не найден."
 
     [ -d "$PROJECT_DIR" ] || die "Каталог проекта не найден: $PROJECT_DIR"
     [ -d "$GIT_DIR" ] || die "Каталог Git-репозитория не найден: $GIT_DIR"
@@ -231,6 +245,9 @@ collect_changes() {
 
     CHANGES=()
 
+    printf '%b\n' "${CYAN}Сканирование проекта и локального Git...${NC}"
+    printf '%b\n' "${YELLOW}Защищённые каталоги (data/, backups/, keys/, secrets/) исключены из сканирования.${NC}"
+
     while IFS= read -r -d '' project_file; do
         relative="${project_file#"$PROJECT_DIR"/}"
 
@@ -247,9 +264,15 @@ collect_changes() {
         fi
     done < <(
         find "$PROJECT_DIR" \
-            -type f \
-            -not -path "$PROJECT_DIR/.git/*" \
-            -print0
+            -type d \
+            \( \
+                -path "$PROJECT_DIR/.git" -o \
+                -path "$PROJECT_DIR/data" -o \
+                -path "$PROJECT_DIR/backups" -o \
+                -path "$PROJECT_DIR/keys" -o \
+                -path "$PROJECT_DIR/secrets" \
+            \) -prune -o \
+            -type f -print0
     )
 
     while IFS= read -r -d '' git_file; do
@@ -266,9 +289,8 @@ collect_changes() {
         fi
     done < <(
         find "$GIT_DIR" \
-            -type f \
-            -not -path "$GIT_DIR/.git/*" \
-            -print0
+            -type d -path "$GIT_DIR/.git" -prune -o \
+            -type f -print0
     )
 }
 
@@ -282,7 +304,8 @@ print_changes() {
         return 1
     fi
 
-    section_title "ИЗМЕНЕНИЯ: ПРОЕКТ → ЛОКАЛЬНЫЙ GIT"
+    section_title "ИЗМЕНЕНИЯ: ПРОЕКТ -> ЛОКАЛЬНЫЙ GIT"
+
     printf '%b\n' "${CYAN} Тип         Файл${NC}"
     printf '%b\n' "${CYAN}────────────────────────────────────────────────────────────${NC}"
 
@@ -323,6 +346,7 @@ select_changes() {
     local index=1
 
     section_title "ВЫБОР ФАЙЛОВ ДЛЯ DEPLOY"
+
     printf '%b\n' "${CYAN}Введите номера файлов через пробел или ${BOLD}all${NC}${CYAN}.${NC}"
     echo
 
@@ -365,9 +389,12 @@ select_changes() {
         return 0
     fi
 
+    local -a numbers=()
+    read -r -a numbers <<< "$answer"
+
     local number
 
-    for number in $answer; do
+    for number in "${numbers[@]}"; do
         if ! [[ "$number" =~ ^[0-9]+$ ]]; then
             warning "Некорректный номер: $number"
             return 1
@@ -525,11 +552,7 @@ check_history() {
     echo
 
     if [ "$behind" -gt 0 ] && [ "$ahead" -gt 0 ]; then
-        error "Локальная история и GitHub имеют разные ветки."
-        error "Автоматический push запрещён во избежание потери истории."
-        echo
-        echo "Требуется вручную разобраться с конфликтом истории."
-        echo
+        warning "Локальная история и GitHub имеют разные ветки."
         return 1
     fi
 
@@ -547,7 +570,7 @@ check_history() {
 # ------------------------------------------------------------
 sync_with_github_before_push() {
     local status
-    local has_unstaged=false
+    local has_changes=false
     local stash_created=false
 
     check_history
@@ -555,24 +578,20 @@ sync_with_github_before_push() {
 
     case "$status" in
         0)
-            # Всё синхронизировано или локальный впереди
             return 0
             ;;
         1|2)
-            # Diverged или Behind: нужен pull --rebase
-            
-            # Проверяем наличие незакоммиченных изменений
-            if ! git -C "$GIT_DIR" diff --quiet 2>/dev/null; then
-                has_unstaged=true
+            if [ -n "$(git -C "$GIT_DIR" status --porcelain --untracked-files=normal 2>/dev/null)" ]; then
+                has_changes=true
             fi
 
-            if [ "$has_unstaged" = true ]; then
+            if [ "$has_changes" = true ]; then
                 echo
                 warning "В локальном репозитории есть незакоммиченные изменения."
                 echo "Автоматически сохраняю их через git stash перед синхронизацией..."
                 echo
 
-                if ! git -C "$GIT_DIR" stash push -m "Auto-stash before deploy sync"; then
+                if ! git -C "$GIT_DIR" stash push --include-untracked -m "Auto-stash before deploy sync"; then
                     error "Не удалось создать stash."
                     echo
                     echo "Необходимо вручную обработать незакоммиченные изменения:"
@@ -589,6 +608,7 @@ sync_with_github_before_push() {
             fi
 
             echo
+
             if [ "$status" -eq 1 ]; then
                 warning "Локальная история и GitHub разошлись."
                 echo "Попытаюсь синхронизировать с помощью git pull --rebase..."
@@ -596,18 +616,19 @@ sync_with_github_before_push() {
                 warning "Локальный репозиторий отстаёт от GitHub."
                 echo "Подтягиваю изменения с GitHub..."
             fi
+
             echo
 
             if ! git -C "$GIT_DIR" pull --rebase origin "$GITHUB_BRANCH"; then
                 error "git pull --rebase завершился с конфликтом."
-                
+
                 if [ "$stash_created" = true ]; then
                     echo
                     warning "Изменения остались в stash. Восстановите их после разрешения конфликтов:"
                     echo "  cd \"$GIT_DIR\""
                     echo "  git stash pop"
                 fi
-                
+
                 echo
                 echo "Необходимо вручную разрешить конфликты:"
                 echo "  cd \"$GIT_DIR\""
@@ -624,25 +645,22 @@ sync_with_github_before_push() {
 
             success "Локальная история синхронизирована с GitHub."
 
-            # Восстанавливаем изменения из stash, если он был создан
             if [ "$stash_created" = true ]; then
                 echo
                 log "Восстанавливаю изменения из stash..."
 
                 if ! git -C "$GIT_DIR" stash pop; then
-                    warning "Не удалось автоматически восстановить изменения из stash."
+                    error "Не удалось автоматически восстановить изменения из stash."
                     echo
                     echo "Изменения остались в stash. Восстановите их вручную:"
                     echo "  cd \"$GIT_DIR\""
                     echo "  git stash list"
                     echo "  git stash pop"
                     echo
-                    echo "Или примените конкретный stash:"
-                    echo "  git stash apply stash@{0}"
-                    echo
-                else
-                    success "Изменения восстановлены из stash."
+                    die "Deploy остановлен."
                 fi
+
+                success "Изменения восстановлены из stash."
             fi
             ;;
     esac
@@ -753,6 +771,10 @@ deploy() {
 
     show_paths_info
 
+    ensure_origin
+    fetch_origin
+    sync_with_github_before_push
+
     collect_changes
 
     if ! print_changes; then
@@ -791,11 +813,6 @@ deploy() {
 
     show_git_status
 
-    ensure_origin
-
-    fetch_origin
-    sync_with_github_before_push
-
     if ! create_commit; then
         return 0
     fi
@@ -815,32 +832,83 @@ deploy() {
 # ============================================================
 # ROLLBACK
 # ============================================================
-show_github_commits() {
-    ensure_origin
-    fetch_origin
 
-    echo
+list_github_commits_numbered() {
+    ROLLBACK_COMMITS=()
+
+    local sha
+    local i=1
+
+    while IFS= read -r sha; do
+        [ -n "$sha" ] && ROLLBACK_COMMITS+=("$sha")
+    done < <(
+        git -C "$GIT_DIR" --no-pager log \
+            "origin/$GITHUB_BRANCH" \
+            --pretty=format:%H \
+            -20 2>/dev/null
+    )
+
+    if [ "${#ROLLBACK_COMMITS[@]}" -eq 0 ]; then
+        warning "Коммиты в origin/$GITHUB_BRANCH не найдены."
+        return 1
+    fi
+
     section_title "ПОСЛЕДНИЕ COMMITS GITHUB"
 
-    git -C "$GIT_DIR" log \
-        "origin/$GITHUB_BRANCH" \
-        --pretty=format:'%h | %ad | %an | %s' \
-        --date='format:%Y-%m-%d %H:%M:%S %z' \
-        -20
+    local short
+    local date
+    local author
+    local subject
 
-    echo
+    for sha in "${ROLLBACK_COMMITS[@]}"; do
+        short="$(git -C "$GIT_DIR" --no-pager show -s --format='%h' "$sha" 2>/dev/null || echo '?')"
+        date="$(git -C "$GIT_DIR" --no-pager show -s --format='%ad' --date=iso "$sha" 2>/dev/null || echo '?')"
+        author="$(git -C "$GIT_DIR" --no-pager show -s --format='%an' "$sha" 2>/dev/null || echo '?')"
+        subject="$(git -C "$GIT_DIR" --no-pager show -s --format='%s' "$sha" 2>/dev/null || echo '?')"
+
+        printf '%3d) %s | %s | %s | %s\n' "$i" "$short" "$date" "$author" "$subject"
+
+        i=$((i + 1))
+    done
+
     echo "------------------------------------------------------------"
     echo
 }
 
-validate_github_commit() {
-    local commit="$1"
+choose_rollback_commit() {
+    local choice
+    local full
 
-    if ! [[ "$commit" =~ ^[0-9a-fA-F]{7,64}$ ]]; then
+    list_github_commits_numbered || return 1
+
+    echo "Введите номер коммита из списка или SHA."
+    echo "Enter — отмена."
+    echo
+
+    printf '%b' "${CYAN}Выбор: ${NC}"
+    read -r choice
+
+    if [ -z "$choice" ]; then
         return 1
     fi
 
-    git -C "$GIT_DIR" cat-file -e "${commit}^{commit}" 2>/dev/null
+    if [[ "$choice" =~ ^[0-9]+$ ]] &&
+       [ "$choice" -ge 1 ] &&
+       [ "$choice" -le "${#ROLLBACK_COMMITS[@]}" ]; then
+        full="${ROLLBACK_COMMITS[$((choice - 1))]}"
+    else
+        if ! full="$(git -C "$GIT_DIR" rev-parse --verify "${choice}^{commit}" 2>/dev/null)"; then
+            error "Указанный коммит не найден."
+            return 1
+        fi
+    fi
+
+    if ! git -C "$GIT_DIR" merge-base --is-ancestor "$full" "origin/$GITHUB_BRANCH" 2>/dev/null; then
+        error "Коммит $full не найден в origin/$GITHUB_BRANCH."
+        return 1
+    fi
+
+    ROLLBACK_COMMIT="$full"
 }
 
 show_rollback_preview() {
@@ -850,17 +918,17 @@ show_rollback_preview() {
     printf '%b\n' "${BOLD}${CYAN}Выбранный commit:${NC}"
     echo "------------------------------------------------------------"
 
-    git -C "$GIT_DIR" show \
+    git -C "$GIT_DIR" --no-pager show \
         -s \
         --format='Commit : %H%nDate   : %ad%nAuthor : %an%nMessage: %s' \
-        --date='format:%Y-%m-%d %H:%M:%S %z' \
+        --date=iso \
         "$commit"
 
     echo
     echo "Изменения относительно предыдущего commit:"
     echo "------------------------------------------------------------"
 
-    git -C "$GIT_DIR" diff-tree \
+    git -C "$GIT_DIR" --no-pager diff-tree \
         --no-commit-id \
         --name-status \
         -r \
@@ -908,11 +976,7 @@ rollback_project_to_commit() {
     temp_dir="$(mktemp -d)" \
         || die "Не удалось создать временный каталог."
 
-    cleanup_rollback_temp() {
-        rm -rf "$temp_dir"
-    }
-
-    trap cleanup_rollback_temp RETURN
+    trap 'rm -rf "$temp_dir"' EXIT
 
     log "Извлекаю выбранный commit во временный каталог..."
 
@@ -970,11 +1034,13 @@ rollback_project_to_commit() {
         -not -path "$PROJECT_DIR/secrets" \
         -delete 2>/dev/null || true
 
+    trap - EXIT
+    rm -rf "$temp_dir"
+
     success "Проект восстановлен из commit $commit."
 }
 
 rollback() {
-    local commit
     local full_commit
 
     echo
@@ -997,35 +1063,19 @@ rollback() {
     ensure_origin
     fetch_origin
 
-    show_github_commits
-
-    echo "Введите SHA commit, из которого необходимо восстановить проект."
-    echo "Можно использовать короткий SHA из списка выше."
-    echo
-
-    printf '%b' "${CYAN}Commit SHA: ${NC}"
-    read -r commit
-
-    if [ -z "$commit" ]; then
+    if ! choose_rollback_commit; then
         warning "Rollback отменён."
         return 0
     fi
 
-    if ! validate_github_commit "$commit"; then
-        error "Указанный SHA не является существующим commit."
-        return 1
-    fi
+    full_commit="$ROLLBACK_COMMIT"
 
-    full_commit="$(
-        git -C "$GIT_DIR" rev-parse "$commit"
-    )"
-
-    echo
     show_rollback_preview "$full_commit"
 
-    printf '%b\n' "${BOLD}${YELLOW}╔════════════════════════════════════════════════════════════╗${NC}"
-    printf '%b\n' "${BOLD}${YELLOW}║                    ПЕРВОЕ ПОДТВЕРЖДЕНИЕ                  ║${NC}"
-    printf '%b\n' "${BOLD}${YELLOW}╚════════════════════════════════════════════════════════════╝${NC}"
+    # --------------------------------------------------------
+    # ПЕРВОЕ ПОДТВЕРЖДЕНИЕ
+    # --------------------------------------------------------
+    printf '%b\n' "${BOLD}${YELLOW}ПЕРВОЕ ПОДТВЕРЖДЕНИЕ${NC}"
     echo
     echo "Будет восстановлен commit:"
     echo "  $full_commit"
@@ -1045,9 +1095,10 @@ rollback() {
     printf '%b\n' "${BOLD}${YELLOW}Резервная копия готова.${NC}"
     echo
 
-    printf '%b\n' "${BOLD}${RED}╔════════════════════════════════════════════════════════════╗${NC}"
-    printf '%b\n' "${BOLD}${RED}║                    ВТОРОЕ ПОДТВЕРЖДЕНИЕ                   ║${NC}"
-    printf '%b\n' "${BOLD}${RED}╚════════════════════════════════════════════════════════════╝${NC}"
+    # --------------------------------------------------------
+    # ВТОРОЕ ПОДТВЕРЖДЕНИЕ
+    # --------------------------------------------------------
+    printf '%b\n' "${BOLD}${RED}ВТОРОЕ ПОДТВЕРЖДЕНИЕ${NC}"
     echo
     echo "Для продолжения необходимо ввести точно:"
     echo
@@ -1103,20 +1154,42 @@ rollback() {
     echo
 }
 
+# ------------------------------------------------------------
+# History
+# ------------------------------------------------------------
+show_github_commits() {
+    ensure_origin
+    fetch_origin
+
+    if [ -z "$(get_remote_sha)" ]; then
+        warning "Ветка origin/$GITHUB_BRANCH не найдена или пуста."
+        return 0
+    fi
+
+    section_title "ИСТОРИЯ GITHUB"
+
+    git -C "$GIT_DIR" --no-pager log \
+        "origin/$GITHUB_BRANCH" \
+        --pretty=format:'%h | %ad | %an | %s' \
+        --date=iso \
+        -20 \
+        || warning "Не удалось получить историю GitHub."
+
+    echo
+}
+
 # ============================================================
 # MENU
 # ============================================================
 show_menu() {
-    clear 2>/dev/null || true
-
     echo
     printf '%b\n' "${BOLD}${CYAN}╔════════════════════════════════════════════════════════════╗${NC}"
-    box_line "              ${BOLD}${MAGENTA}MEDICAL DIARY — DEPLOY TOOL${NC}"      
+    box_line "              ${BOLD}${MAGENTA}MEDICAL DIARY - DEPLOY TOOL${NC}" "              MEDICAL DIARY - DEPLOY TOOL"
     printf '%b\n' "${BOLD}${CYAN}╠════════════════════════════════════════════════════════════╣${NC}"
-    box_line "  ${GREEN}1${NC}  ${BOLD}Deploy${NC}    ${BLUE}Проект → Git → GitHub${NC}"
-    box_line "  ${YELLOW}2${NC}  ${BOLD}Rollback${NC}  ${BLUE}GitHub → Проект${NC}"
-    box_line "  ${MAGENTA}3${NC}  ${BOLD}History${NC}   ${BLUE}История GitHub${NC}"
-    box_line "  ${RED}4${NC}  ${BOLD}Exit${NC}      ${BLUE}Выход${NC}"
+    box_line "  ${GREEN}1${NC}  ${BOLD}Deploy${NC}    ${BLUE}Проект -> Git -> GitHub${NC}" "  1  Deploy    Проект -> Git -> GitHub"
+    box_line "  ${YELLOW}2${NC}  ${BOLD}Rollback${NC}  ${BLUE}GitHub -> Проект${NC}" "  2  Rollback  GitHub -> Проект"
+    box_line "  ${MAGENTA}3${NC}  ${BOLD}History${NC}   ${BLUE}История GitHub${NC}" "  3  History   История GitHub"
+    box_line "  ${RED}4${NC}  ${BOLD}Exit${NC}      ${BLUE}Выход${NC}" "  4  Exit      Выход"
     printf '%b\n' "${BOLD}${CYAN}╚════════════════════════════════════════════════════════════╝${NC}"
 
     show_paths_info
@@ -1146,17 +1219,20 @@ main() {
         show_menu
 
         printf '%b' "${CYAN}Выберите действие [1-4]: ${NC}"
-        read -r choice
+        read -r choice || exit 0
 
         case "$choice" in
             1)
                 deploy
+                pause
                 ;;
             2)
                 rollback
+                pause
                 ;;
             3)
                 show_github_commits
+                pause
                 ;;
             4)
                 echo "Выход."
@@ -1164,6 +1240,7 @@ main() {
                 ;;
             *)
                 warning "Неверный выбор."
+                pause
                 ;;
         esac
     done

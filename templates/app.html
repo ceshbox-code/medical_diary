@@ -19,6 +19,13 @@
   <button type="button" id="header-logout-core" class="header-action" onclick="logout()" aria-label="Выйти" title="Выйти">↪</button>
 </header>
 <main>
+{% if is_admin %}
+<section id="page-admin" class="tab-page">
+  <div class="page-intro"><div><h1>Администрирование</h1><p>Управление пользователями и резервными копиями БД.</p></div></div>
+  <div class="card admin-section"><details open><summary>👥 Пользователи</summary><form id="user-form"><label>Логин</label><input name="username" maxlength="64" autocomplete="off" required><label>Отображаемое имя</label><input name="display_name" maxlength="100" required><label>Пароль</label><input name="password" type="password" minlength="8" autocomplete="new-password" required><button type="submit" class="admin-action">Добавить пользователя</button><div class="message" id="user-msg"></div></form><form id="user-edit-form" hidden><div class="edit-title" id="user-edit-title">✏️ Редактирование пользователя</div><label>Логин</label><input name="username" maxlength="64" autocomplete="off" required><label>Отображаемое имя</label><input name="display_name" maxlength="100" required><label>Новый пароль</label><input name="password" type="password" minlength="8" autocomplete="new-password"><button type="submit">Сохранить</button><button type="button" class="secondary" onclick="cancelUserEdit()">Отмена</button><div class="message" id="user-edit-msg"></div></form><div class="table-wrap"><table id="users-table"><thead><tr><th>Имя</th><th>Логин</th><th></th></tr></thead><tbody></tbody></table></div></details></div>
+  <div class="card admin-section"><details open><summary>🗄️ Резервные копии БД</summary><p class="muted" id="backup-status">Загрузка статуса…</p><button type="button" class="admin-action" onclick="runBackupNow()">Снять копию сейчас</button><div class="message" id="backup-msg"></div><div class="table-wrap"><table id="backup-table"><thead><tr><th>Файл</th><th>Создан</th><th>Размер</th><th>Действие</th></tr></thead><tbody></tbody></table></div></details></div>
+</section>
+{% else %}
 <section id="page-input" class="tab-page">
   <div class="page-intro"><h1>Здравствуйте</h1><p id="today-label">Сегодня</p></div>
   <div class="section-label"><strong>Быстрая запись</strong><span>Нажмите, чтобы добавить</span></div>
@@ -71,13 +78,12 @@
         </div><div class="message" id="ranges-msg"></div></div>
       </details></div>
 
-      {% if is_admin %}
-      <div class="card admin-section"><details><summary>👥 Пользователи</summary><form id="user-form"><label>Логин</label><input name="username" maxlength="64" autocomplete="off" required><label>Отображаемое имя</label><input name="display_name" maxlength="100" required><label>Пароль</label><input name="password" type="password" minlength="8" autocomplete="new-password" required><button type="submit" class="admin-action">Добавить пользователя</button><div class="message" id="user-msg"></div></form><form id="user-edit-form" hidden><div class="edit-title" id="user-edit-title">✏️ Редактирование пользователя</div><label>Логин</label><input name="username" maxlength="64" autocomplete="off" required><label>Отображаемое имя</label><input name="display_name" maxlength="100" required><label>Новый пароль</label><input name="password" type="password" minlength="8" autocomplete="new-password"><button type="submit">Сохранить</button><button type="button" class="secondary" onclick="cancelUserEdit()">Отмена</button><div class="message" id="user-edit-msg"></div></form><div class="table-wrap"><table id="users-table"><thead><tr><th>Имя</th><th>Логин</th><th></th></tr></thead><tbody></tbody></table></div></details></div>
-      <div class="card admin-section"><details><summary>🗄️ Резервные копии БД</summary><p class="muted" id="backup-status">Загрузка статуса…</p><button type="button" class="admin-action" onclick="runBackupNow()">Снять копию сейчас</button><div class="message" id="backup-msg"></div><div class="table-wrap"><table id="backup-table"><thead><tr><th>Файл</th><th>Создан</th><th>Размер</th><th>Действие</th></tr></thead><tbody></tbody></table></div></details></div>
-      {% endif %}
+
     </section>
+{% endif %}
 </main></div>
-<nav class="tab-bar" aria-label="Основная навигация"><button type="button" class="tab-btn" id="tab-btn-input" onclick="showPage('input')"><span class="tab-icon">📝</span><span>Ввод</span></button><button type="button" class="tab-btn" id="tab-btn-history" onclick="showPage('history')"><span class="tab-icon">▥</span><span>История</span></button><button type="button" class="tab-btn" id="tab-btn-settings" onclick="showPage('settings')"><span class="tab-icon">⚙️</span><span>Ещё</span></button></nav>
+{% if not is_admin %}<nav class="tab-bar" aria-label="Основная навигация"><button type="button" class="tab-btn" id="tab-btn-input" onclick="showPage('input')"><span class="tab-icon">📝</span><span>Ввод</span></button><button type="button" class="tab-btn" id="tab-btn-history" onclick="showPage('history')"><span class="tab-icon">▥</span><span>История</span></button><button type="button" class="tab-btn" id="tab-btn-settings" onclick="showPage('settings')"><span class="tab-icon">⚙️</span><span>Ещё</span></button></nav>{% endif %}
+{% if not is_admin %}
 <div id="entry-modal" class="modal" hidden><div class="modal-panel"><div class="modal-grabber"></div><div class="modal-head"><div id="modal-icon" class="quick-icon glucose">💧</div><div class="modal-title"><h2 id="modal-title">Глюкоза</h2><p id="modal-subtitle">Ввод показателя</p></div><button type="button" id="modal-close-core" class="close-btn" onclick="closeEntry()">×</button></div>
 <form id="glucose-form" hidden><div class="metric-hero"><label>Значение, ммоль/л</label><div class="metric-input"><input name="value" class="decimal-input" type="text" inputmode="decimal" pattern="[0-9]+([.,][0-9]+)?" required><span class="metric-unit">ммоль/л</span></div><div class="metric-status"><p class="field-hint" id="hint-glucose"></p></div></div><label>Контекст измерения</label><div class="segmented"><input type="radio" id="gt_fasting" name="glucose_type" value="fasting" checked><label for="gt_fasting">🌅 Натощак</label><input type="radio" id="gt_postmeal" name="glucose_type" value="post_meal"><label for="gt_postmeal">🍽️ После еды</label></div><label>Дата и время</label><input name="measured_at" type="datetime-local" class="dt"><label>Комментарий <span class="muted">(необязательно)</span></label><textarea name="comment" maxlength="1000" placeholder="Например: хорошее самочувствие"></textarea><p class="last-entry-status muted" id="last-status-glucose"></p><button type="submit" class="primary-action">Сохранить измерение</button><div class="message" id="glucose-msg"></div></form>
 <form id="vitals-form" hidden><div class="vitals-entry"><div class="bp-field"><div class="bp-caption">Систолическое · мм рт. ст.</div><input name="systolic" type="number" min="30" max="400" inputmode="numeric" required><p class="field-hint" id="hint-systolic"></p></div><div class="bp-field"><div class="bp-caption">Диастолическое · мм рт. ст.</div><input name="diastolic" type="number" min="10" max="300" inputmode="numeric" required><p class="field-hint" id="hint-diastolic"></p></div></div><div class="bp-field pulse-field"><div class="bp-caption">Пульс · уд/мин</div><input name="pulse" type="number" min="20" max="300" inputmode="numeric"><p class="field-hint" id="hint-pulse"></p></div><label>Дата и время</label><input name="measured_at" type="datetime-local" class="dt"><label>Комментарий <span class="muted">(необязательно)</span></label><textarea name="comment" maxlength="1000" placeholder="Например: после прогулки"></textarea><p class="last-entry-status muted" id="last-status-vitals"></p><button type="submit" class="primary-action">Сохранить измерение</button><div class="message" id="vitals-msg"></div></form>
@@ -85,6 +91,8 @@
 <form id="weight-form" hidden><div class="metric-hero weight-hero"><label>Вес, кг</label><div class="metric-input"><input name="value" class="decimal-input" type="text" inputmode="decimal" pattern="[0-9]+([.,][0-9]+)?" required><span class="metric-unit">кг</span></div></div><label>Дата и время</label><input name="measured_at" type="datetime-local" class="dt"><label>Комментарий <span class="muted">(необязательно)</span></label><textarea name="comment" maxlength="1000" placeholder="Например: утром натощак"></textarea><p class="last-entry-status muted" id="last-status-weight"></p><button type="submit" class="primary-action">Сохранить измерение</button><div class="message" id="weight-msg"></div></form>
 <form id="food-form" hidden><div class="food-line"><label style="margin-top:0">Продукт</label><input name="food_name" maxlength="150" required placeholder="Например: овсяная каша"><div class="row"><div><label>Количество</label><input name="amount_value" class="decimal-input" type="text" inputmode="decimal" required></div><div><label>Единица</label><select name="amount_unit"><option value="г">г</option><option value="мл">мл</option><option value="шт">шт</option><option value="порция">порция</option></select></div></div></div><label>Дата и время</label><input name="consumed_at" type="datetime-local" class="dt"><label>Комментарий <span class="muted">(необязательно)</span></label><textarea name="comment" maxlength="1000"></textarea><p class="last-entry-status muted" id="last-status-food"></p><button type="submit" class="primary-action">Сохранить запись</button><div class="message" id="food-msg"></div></form>
 </div></div>
+{% endif %}
+{% if not is_admin %}
 <div id="pdf-overlay" hidden><div class="pdf-toolbar"><button type="button" class="pdf-btn" onclick="zoomPdf(-1)">➖</button><span id="zoom-label">100%</span><button type="button" class="pdf-btn" onclick="zoomPdf(1)">➕</button><span class="pdf-title">📄 Медицинский дневник</span><button type="button" class="pdf-btn" onclick="downloadPdf()">⬇️</button><button type="button" class="pdf-btn" onclick="sharePdf()">📤</button><button type="button" class="pdf-btn" onclick="closePdfViewer()">❌</button></div><div id="pdf-pages"></div></div>
 <div id="pdf-type-modal" class="modal" hidden><div class="modal-panel"><div class="modal-grabber"></div><div class="modal-head"><div class="modal-title"><h2>Записи для PDF</h2><p class="muted">Отметьте один или несколько типов</p></div><button type="button" class="close-btn" onclick="closePdfTypeModal()">×</button></div>
 <div class="pdf-type-list">
@@ -97,6 +105,7 @@
 <button type="button" class="primary-action" onclick="confirmPdfTypeSelection()">Сформировать PDF</button>
 <p class="message" id="pdf-type-msg"></p>
 </div></div>
+{% endif %}
 <script>
     var IS_ADMIN = {{ is_admin | tojson }};
     var USER_ID = {{ user_id }};
@@ -104,5 +113,5 @@ var USER_SETTINGS = {{ settings_json | safe }};
 var RANGES = {{ ranges_json | safe }};
 var DEFAULT_RANGES_JS = {{ default_ranges_json | safe }};
 </script>
-<script src="/js/app.js"></script>
+{% if is_admin %}<script src="/js/admin.js"></script>{% else %}<script src="/js/app.js"></script>{% endif %}
 </body></html>
