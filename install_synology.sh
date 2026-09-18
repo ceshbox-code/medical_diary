@@ -5,11 +5,12 @@ REPO_URL="https://github.com/ceshbox-code/medical_diary.git"
 BRANCH="${MEDICAL_DIARY_BRANCH:-main}"
 DEFAULT_INSTALL_DIR="/volume1/docker/medical_diary"
 DEFAULT_HTTP_PORT="8000"
+DEFAULT_CONTAINER_NAME="medical-diary-app"
 DEFAULT_TZ="UTC"
 
-log() { printf '\n[medical-diary] %s\n' "$*"; }
+log()  { printf '\n[medical-diary] %s\n' "$*"; }
 warn() { printf '\n[medical-diary] WARNING: %s\n' "$*" >&2; }
-die() { printf '\n[medical-diary] ERROR: %s\n' "$*" >&2; exit 1; }
+die()  { printf '\n[medical-diary] ERROR: %s\n' "$*" >&2; exit 1; }
 
 # The installer is normally started as `curl ... | sh`, so stdin belongs to
 # the shell script itself. Interactive input must therefore be read from the
@@ -80,12 +81,38 @@ validate_domain() {
     return 0
 }
 
+# Имя контейнера Docker: первый символ — буква/цифра, далее [A-Za-z0-9._-].
+validate_container_name() {
+    case "$1" in
+        ''|.[!A-Za-z0-9]*) return 1 ;;
+    esac
+    case "$1" in
+        [A-Za-z0-9]*) ;;
+        *) return 1 ;;
+    esac
+    case "$1" in
+        *[!A-Za-z0-9._-]*) return 1 ;;
+    esac
+    return 0
+}
+
+# Добавить или обновить переменную в .env, не ломая остальное содержимое.
+upsert_env_var() {
+    _file="$1"
+    _key="$2"
+    _val="$3"
+    if grep -q "^${_key}=" "$_file"; then
+        sed -i "s|^${_key}=.*$|${_key}=${_val}|" "$_file"
+    else
+        printf '%s=%s\n' "$_key" "$_val" >> "$_file"
+    fi
+}
+
 require_cmd() {
     command -v "$1" >/dev/null 2>&1 || die "$2"
 }
 
 [ "$(id -u)" -eq 0 ] || die "Запустите скрипт от root (SSH на Synology: sudo -i, затем повторите)."
-
 require_cmd openssl "Не найден openssl."
 require_cmd curl "Не найден curl."
 require_cmd sed "Не найден sed."
@@ -109,13 +136,16 @@ fi
 printf '\n=============================================\n'
 printf ' Medical Diary — установка на Synology DSM\n'
 printf ' Container Manager / Docker Compose\n'
-printf '=============================================\n\n'
+printf '=============================================\n'
 
 INSTALL_DIR=$(prompt "Папка установки (только /volume1/docker/...)" "${MEDICAL_DIARY_DIR:-$DEFAULT_INSTALL_DIR}")
 validate_install_dir "$INSTALL_DIR" || die "Недопустимая папка. Используйте путь вида /volume1/docker/medical_diary."
 
 HTTP_PORT=$(prompt "Внешний порт приложения (в контейнере порт 8000)" "${MEDICAL_DIARY_HTTP_PORT:-$DEFAULT_HTTP_PORT}")
 validate_port "$HTTP_PORT" || die "Недопустимый порт: $HTTP_PORT"
+
+CONTAINER_NAME=$(prompt "Имя Docker-контейнера" "${MEDICAL_DIARY_CONTAINER_NAME:-$DEFAULT_CONTAINER_NAME}")
+validate_container_name "$CONTAINER_NAME" || die "Недопустимое имя контейнера. Используйте буквы, цифры, '.', '_' и '-', начиная с буквы или цифры."
 
 DOMAIN=$(prompt "Доменное имя для доступа и Face ID/WebAuthn (пусто — без домена)" "${MEDICAL_DIARY_DOMAIN:-}")
 validate_domain "$DOMAIN" || die "Недопустимое доменное имя. Введите только hostname, например diary.example.ru, без http://, https:// и пути."
@@ -146,6 +176,7 @@ fi
 printf '\nБудет установлено:\n'
 printf '  Папка:       %s\n' "$INSTALL_DIR"
 printf '  Порт:        %s:8000\n' "$HTTP_PORT"
+printf '  Контейнер:   %s\n' "$CONTAINER_NAME"
 if [ -n "$DOMAIN" ]; then
     printf '  Домен:       %s\n' "$DOMAIN"
     printf '  WebAuthn:    %s (RP ID: %s)\n' "$WA_ORIGIN" "$WA_RP_ID"
@@ -153,7 +184,6 @@ else
     printf '  Домен:       не задан\n'
 fi
 printf '\n'
-
 confirm "Продолжить?" "y" || die "Установка отменена."
 
 PARENT_DIR=$(dirname "$INSTALL_DIR")
@@ -196,7 +226,6 @@ else
 fi
 
 cd "$INSTALL_DIR"
-
 [ -f docker-compose.yml ] || die "В репозитории отсутствует docker-compose.yml"
 [ -f Dockerfile ] || die "В репозитории отсутствует Dockerfile"
 [ -f .env.example ] || die "В репозитории отсутствует .env.example"
@@ -207,9 +236,7 @@ chmod 700 data backups 2>/dev/null || true
 if [ ! -f .env ]; then
     log "Создаю .env из .env.example"
     cp .env.example .env
-
     SECRET_KEY=$(openssl rand -hex 32) || die "Не удалось сгенерировать SECRET_KEY"
-
     ADMIN_PASSWORD=""
     attempts=0
     while [ "${#ADMIN_PASSWORD}" -lt 20 ] && [ "$attempts" -lt 10 ]; do
@@ -217,7 +244,6 @@ if [ ! -f .env ]; then
         attempts=$((attempts + 1))
     done
     [ "${#ADMIN_PASSWORD}" -ge 20 ] || die "Не удалось сгенерировать пароль администратора."
-
     sed -i "s|^SECRET_KEY=.*$|SECRET_KEY=$SECRET_KEY|" .env
     sed -i "s|^ADMIN_USERNAME=.*$|ADMIN_USERNAME=admin|" .env
     sed -i "s|^ADMIN_PASSWORD=.*$|ADMIN_PASSWORD=$ADMIN_PASSWORD|" .env
@@ -226,37 +252,17 @@ if [ ! -f .env ]; then
     sed -i "s|^SESSION_COOKIE_SECURE=.*$|SESSION_COOKIE_SECURE=$SESSION_SECURE|" .env
     sed -i "s|^WA_RP_ID=.*$|WA_RP_ID=$WA_RP_ID|" .env
     sed -i "s|^WA_ORIGIN=.*$|WA_ORIGIN=$WA_ORIGIN|" .env
-
+    upsert_env_var .env "CONTAINER_NAME" "$CONTAINER_NAME"
     chmod 600 .env
-    printf '\n[medical-diary] Первоначальный пароль администратора:\n%s\n' "$ADMIN_PASSWORD"
+    printf '\n[medical-diary] Первоначальный пароль администратора:\n  %s\n' "$ADMIN_PASSWORD"
     printf '[medical-diary] Он также сохранён в %s/.env с правами 600.\n' "$INSTALL_DIR"
 else
     log ".env уже существует — секреты не меняю."
-
-    if grep -q '^HTTP_PORT=' .env; then
-        sed -i "s|^HTTP_PORT=.*$|HTTP_PORT=$HTTP_PORT|" .env
-    else
-        printf '\nHTTP_PORT=%s\n' "$HTTP_PORT" >> .env
-    fi
-
-    if grep -q '^SESSION_COOKIE_SECURE=' .env; then
-        sed -i "s|^SESSION_COOKIE_SECURE=.*$|SESSION_COOKIE_SECURE=$SESSION_SECURE|" .env
-    else
-        printf 'SESSION_COOKIE_SECURE=%s\n' "$SESSION_SECURE" >> .env
-    fi
-
-    if grep -q '^WA_RP_ID=' .env; then
-        sed -i "s|^WA_RP_ID=.*$|WA_RP_ID=$WA_RP_ID|" .env
-    else
-        printf 'WA_RP_ID=%s\n' "$WA_RP_ID" >> .env
-    fi
-
-    if grep -q '^WA_ORIGIN=' .env; then
-        sed -i "s|^WA_ORIGIN=.*$|WA_ORIGIN=$WA_ORIGIN|" .env
-    else
-        printf 'WA_ORIGIN=%s\n' "$WA_ORIGIN" >> .env
-    fi
-
+    upsert_env_var .env "HTTP_PORT" "$HTTP_PORT"
+    upsert_env_var .env "SESSION_COOKIE_SECURE" "$SESSION_SECURE"
+    upsert_env_var .env "WA_RP_ID" "$WA_RP_ID"
+    upsert_env_var .env "WA_ORIGIN" "$WA_ORIGIN"
+    upsert_env_var .env "CONTAINER_NAME" "$CONTAINER_NAME"
     chmod 600 .env 2>/dev/null || true
 fi
 
@@ -266,7 +272,7 @@ validate_port "$HTTP_PORT_VALUE" || die "Некорректный HTTP_PORT в .
 
 if command -v ss >/dev/null 2>&1; then
     if ss -lnt 2>/dev/null | awk -v p=":$HTTP_PORT_VALUE" '$4 ~ p"$" {found=1} END {exit found ? 0 : 1}'; then
-        if ! "$DOCKER" ps --format '{{.Names}}' | grep -qx 'medical-diary-app'; then
+        if ! "$DOCKER" ps --format '{{.Names}}' | grep -qx "$CONTAINER_NAME"; then
             die "Порт $HTTP_PORT_VALUE уже занят другим процессом. Выберите другой внешний порт."
         fi
     fi
@@ -300,12 +306,14 @@ if [ "$OK" -ne 1 ]; then
 fi
 
 log "Установка завершена успешно"
+
 printf '\n---------------------------------------------\n'
 printf ' Локальный URL: http://<IP-SYNOLOGY>:%s/\n' "$HTTP_PORT_VALUE"
 if [ -n "$DOMAIN" ]; then
     printf ' Домен:         %s\n' "$WA_ORIGIN"
     printf ' WebAuthn RP:   %s\n' "$WA_RP_ID"
 fi
+printf ' Контейнер:     %s\n' "$CONTAINER_NAME"
 printf ' Каталог:       %s\n' "$INSTALL_DIR"
 printf ' База данных:   %s/data/medical_diary.db\n' "$INSTALL_DIR"
 printf ' Бэкапы:        %s/backups/\n' "$INSTALL_DIR"
@@ -313,4 +321,5 @@ printf '---------------------------------------------\n'
 printf '\nКоманды:\n'
 printf '  cd "%s" && %s ps\n' "$INSTALL_DIR" "$COMPOSE"
 printf '  cd "%s" && %s logs -f\n' "$INSTALL_DIR" "$COMPOSE"
+printf '  docker logs -f %s\n' "$CONTAINER_NAME"
 printf '\nПовторный запуск обновляет код, но сохраняет .env, data/ и backups/.\n'
