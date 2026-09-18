@@ -1,8 +1,11 @@
 <div align="center">
 ![🩺 Medical Diary v2 — баннер](docs/badges/banner.svg)
+</div>
+
+
+
 
 <div align="center">
-
 [![Docker](docs/badges/docker.svg)](#-архитектура)
 [![Python](docs/badges/python.svg)](#-архитектура)
 [![SQLite](docs/badges/sqlite.svg)](#-архитектура)
@@ -96,7 +99,7 @@ cd /volume1/docker/medical_diary
 ### 2️⃣ Скачайте код
 
 ```bash
-sudo git clone https://github.com/ВАШ_ПОЛЬЗОВАТЕЛЬ/medical_diary.git .
+sudo git clone https://github.com/ceshbox-code/medical_diary.git .
 ```
 
 ### 3️⃣ Настройте окружение
