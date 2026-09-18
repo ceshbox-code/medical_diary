@@ -114,6 +114,16 @@ upsert_env_var() {
     _file="$1"
     _key="$2"
     _val="$3"
+    
+    # Гарантируем, что файл заканчивается переводом строки
+    if [ -s "$_file" ]; then
+        # Проверяем последний байт файла
+        _last_byte=$(tail -c 1 "$_file" | od -An1 | tr -d ' ')
+        if [ "$_last_byte" != "10" ]; then
+            printf '\n' >> "$_file"
+        fi
+    fi
+    
     if grep -q "^${_key}=" "$_file"; then
         sed -i "s|^${_key}=.*$|${_key}=${_val}|" "$_file"
     else
