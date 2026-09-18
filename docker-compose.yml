@@ -1,7 +1,9 @@
 services:
   app:
+    container_name: ${CONTAINER_NAME:-medical-diary-app}
     build: .
-    container_name: medical-diary-app
+    environment:
+      - TZ=${TZ:-Europe/Moscow}
     restart: unless-stopped
     env_file:
       - .env
