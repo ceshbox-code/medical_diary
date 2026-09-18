@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="100" viewBox="0 0 900 100">
+  <defs>
+    <linearGradient id="ft" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0" stop-color="#00C9FF"/>
+      <stop offset="0.45" stop-color="#7F00FF"/>
+      <stop offset="1" stop-color="#FF0080"/>
+    </linearGradient>
+  </defs>
+  <path d="M0,40 Q450,-20 900,40 V100 H0 Z" fill="url(#ft)"/>
+  <text x="450" y="75" fill="#fff" font-family="Arial,sans-serif" font-size="14" text-anchor="middle">Сделано с ❤️ и 🐳 для личного использования на Synology</text>
+</svg>

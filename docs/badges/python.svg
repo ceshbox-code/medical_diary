@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="122" height="28" viewBox="0 0 122 28">
+  <linearGradient id="g2" x2="0" y2="100%"><stop offset="0" stop-color="#3776AB"/><stop offset="1" stop-color="#2B5E87"/></linearGradient>
+  <rect width="122" height="28" rx="6" fill="url(#g2)"/>
+  <text x="14" y="19" fill="#fff" font-family="Verdana,DejaVu Sans,sans-serif" font-size="12" font-weight="700">🐍 Python 3.11+</text>
+</svg>

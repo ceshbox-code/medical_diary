@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="104" height="28" viewBox="0 0 104 28">
+  <linearGradient id="g3" x2="0" y2="100%"><stop offset="0" stop-color="#003B57"/><stop offset="1" stop-color="#002840"/></linearGradient>
+  <rect width="104" height="28" rx="6" fill="url(#g3)"/>
+  <text x="14" y="19" fill="#fff" font-family="Verdana,DejaVu Sans,sans-serif" font-size="12" font-weight="700">💾 SQLite DB</text>
+</svg>

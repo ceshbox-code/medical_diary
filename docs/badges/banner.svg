@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="210" viewBox="0 0 900 210">
+  <defs>
+    <linearGradient id="bg" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0" stop-color="#00C9FF"/>
+      <stop offset="0.45" stop-color="#7F00FF"/>
+      <stop offset="1" stop-color="#FF0080"/>
+    </linearGradient>
+  </defs>
+  <path d="M0,0 H900 V160 Q450,220 0,160 Z" fill="url(#bg)"/>
+  <text x="450" y="95" fill="#fff" font-family="Arial,sans-serif" font-size="44" font-weight="700" text-anchor="middle">🩺 Medical Diary v2</text>
+  <text x="450" y="135" fill="#fff" font-family="Arial,sans-serif" font-size="16" text-anchor="middle" opacity="0.9">Приватный медицинский дневник · iPhone · Synology · Docker</text>
+</svg>
