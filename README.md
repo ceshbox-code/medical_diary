@@ -122,7 +122,7 @@ cd /volume1/docker/medical_diary
 ### 2️⃣ Скачайте код
 
 ```bash
-sudo git clone https://github.com/ВАШ_ПОЛЬЗОВАТЕЛЬ/medical_diary.git .
+sudo git clone https://github.com/ceshbox-code/medical_diary.git .
 ```
 
 ### 3️⃣ Настройте окружение
