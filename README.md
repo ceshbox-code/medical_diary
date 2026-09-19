@@ -228,16 +228,29 @@ docker exec medical-diary python3 scripts/backup.py
 
 ## 🧰 Шпаргалка владельца
 
-| Задача                      | Команда                                                      |
-| :-------------------------- | :----------------------------------------------------------- |
-| ✅ Проверка здоровья сервиса | `curl http://127.0.0.1:8000/health`                          |
-| ▶️ Запуск / пересборка       | `docker compose up -d --build`                               |
-| 🛑 Остановка                 | `docker compose down`                                        |
-| 🪵 Логи                      | `docker logs -f medical-diary`                               |
-| 💾 Резервная копия           | `docker exec medical-diary python3 scripts/backup.py`        |
-| 🔑 Сброс пароля админа       | `./scripts/reset_admin_password.sh --ask`                    |
-| 🔄 Обновление (вручную)      | `git pull && docker compose up -d --build`                   |
-| 🔄 Обновление (скрипт)       | `curl -fsSL https://raw.githubusercontent.com/ceshbox-code/medical_diary/main/install_synology.sh \| sh` |
+Скрипт установки копирует утилиту `mdctl` в `/usr/local/bin/`, поэтому команды
+работают из любой папки и автоматически находят папку проекта и контейнер,
+даже если вы установили проект не в `/volume1/docker/medical_diary`
+или задали нестандартное имя контейнера.
+
+| Задача | Команда |
+| :--- | :--- |
+| ✅ Проверка здоровья сервиса | `mdctl health` |
+| 📊 Статус контейнера | `mdctl status` |
+| 💾 Резервная копия | `mdctl backup` |
+| 🪵 Логи | `mdctl logs` |
+| 🪵 Логи в реальном времени | `mdctl logs -f` |
+| 🔄 Обновление | `mdctl update` |
+| 🔑 Сброс пароля админа | `mdctl reset-password` |
+| 🐚 Оболочка контейнера | `mdctl shell` |
+| 💾 Открыть базу данных | `mdctl db` |
+| 📄 Показать конфигурацию | `mdctl env` |
+| 📁 Показать папку проекта | `mdctl path` |
+
+Если проект установлен в нестандартную папку, задайте её один раз:
+
+```bash
+export MEDICAL_DIARY_HOME=/volume2/docker/my_diary
 
 ---
 

@@ -380,6 +380,13 @@ if [ "$OK" -ne 1 ]; then
     die "Проверьте логи: cd '$INSTALL_DIR' && $COMPOSE logs -f"
 fi
 
+# Устанавливаем утилиту управления в системный PATH
+if [ -f scripts/mdctl.sh ]; then
+    cp scripts/mdctl.sh /usr/local/bin/mdctl
+    chmod +x /usr/local/bin/mdctl
+    log "Установлена утилита: mdctl (доступна из любой папки)"
+fi
+
 log "Установка завершена успешно"
 
 printf '\n---------------------------------------------\n'
