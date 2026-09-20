@@ -347,7 +347,7 @@ if [ ! -f "$ENV_FILE" ]; then
     upsert_env_var "$ENV_FILE" "SECRET_KEY"            "$SECRET_KEY"
     upsert_env_var "$ENV_FILE" "ADMIN_USERNAME"         "admin"
     upsert_env_var "$ENV_FILE" "ADMIN_PASSWORD"         "$ADMIN_PASSWORD"
-    upsert_env_var "$ENV_FILE" "DATABASE_PATH"          "/app/data/medical_diary.db"
+    upsert_env_var "$ENV_FILE" "DATABASE_PATH"          "/data/medical_diary.db"
     upsert_env_var "$ENV_FILE" "HTTP_PORT"              "$HTTP_PORT"
     upsert_env_var "$ENV_FILE" "TZ"                     "$TZ_VALUE"
     upsert_env_var "$ENV_FILE" "SESSION_COOKIE_SECURE"  "$SESSION_SECURE"
