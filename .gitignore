@@ -2,4 +2,5 @@
    data/
    backups/
    __pycache__/
-   *.pyc
+   *.pycdeploy.sh
+deploy.conf

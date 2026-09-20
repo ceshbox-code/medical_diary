@@ -967,8 +967,6 @@ git_to_github() {
 
     show_paths_info
 
-    protect_self_from_git
-
     printf '%b\n' "${YELLOW}Файлы проекта ($PROJECT_DIR) в этой операции НЕ участвуют.${NC}"
     printf '%b\n' "${YELLOW}Будет закоммичено и отправлено то, что уже есть в локальном${NC}"
     printf '%b\n' "${YELLOW}Git-репозитории: $GIT_REPO_DIR${NC}"
@@ -976,6 +974,18 @@ git_to_github() {
     ensure_origin
     fetch_origin
     sync_with_github_before_push
+
+    # protect_self_from_git — ПОСЛЕ синхронизации с GitHub, а не до неё.
+    # Если делать это раньше, её незакоммиченная правка .gitignore и
+    # git rm --cached превращают deploy.sh в "untracked" файл ровно в
+    # момент, когда sync_with_github_before_push может понадобиться
+    # git stash --include-untracked + rebase — а rebase на историю,
+    # где deploy.sh ещё отслеживается (пока push с untrack не прошёл),
+    # заново материализует его в рабочей копии и ломает stash pop
+    # ("could not restore untracked files from stash"). Выполняя это
+    # после sync, мы либо не проходим через stash вовсе (чаще всего),
+    # либо делаем это до появления такой правки.
+    protect_self_from_git
 
     show_git_status
 
@@ -1022,8 +1032,6 @@ deploy() {
 
     show_paths_info
 
-    protect_self_from_git
-
     ensure_origin
     fetch_origin
     sync_with_github_before_push
@@ -1063,6 +1071,15 @@ deploy() {
     copy_selected_to_git
 
     success "Изменения перенесены в локальный Git-репозиторий."
+
+    # protect_self_from_git — ПОСЛЕ copy_selected_to_git, а не до него.
+    # copy_selected_to_git синхронизирует .gitignore и другие файлы
+    # проекта В git-каталог; если чистить/дописывать .gitignore ДО
+    # этого шага, только что добавленные строки deploy.sh/deploy.conf
+    # тут же перезаписываются старой версией .gitignore из проекта —
+    # защита откатывается в рамках того же запуска, ничего не попадает
+    # в commit, и deploy.sh остаётся отслеживаемым.
+    protect_self_from_git
 
     show_git_status
 
