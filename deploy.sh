@@ -35,16 +35,64 @@
 set -uo pipefail
 
 # ------------------------------------------------------------
-# Конфигурация
+# Защита от чужого GIT_DIR в окружении
+#
+# GIT_DIR — зарезервированное имя переменной окружения самого git:
+# если оно установлено, git ищет репозиторий ПО ЭТОМУ ПУТИ НАПРЯМУЮ
+# (ожидая, что там лежит сама метаинформация репозитория — objects/,
+# refs/, HEAD — а не рабочее дерево с подкаталогом .git), и все
+# команды git внутри этого скрипта тогда ломаются с непонятной
+# ошибкой "not a git repository", даже если путь абсолютно верный.
+# Раз мы поддерживаем настройку через переменные окружения — снимаем
+# случайно унаследованный GIT_DIR из окружения ДО того, как скрипт
+# вызовет хоть одну git-команду. Свою собственную переменную для пути
+# к локальному репозиторию скрипт называет GIT_REPO_DIR (см. ниже) —
+# именно её и нужно задавать/переопределять, а не GIT_DIR.
 # ------------------------------------------------------------
+unset GIT_DIR
+
+# ------------------------------------------------------------
+# Конфигурация
+#
+# Приоритет источников значений (первое найденное побеждает):
+#   1. Переменная окружения, заданная явно при запуске
+#      (например: PROJECT_DIR=/other/path ./deploy.sh)
+#   2. Файл deploy.conf рядом со скриптом (или путь в DEPLOY_CONFIG)
+#   3. Значения по умолчанию ниже (изначально — для Medical Diary)
+#
+# Чтобы использовать этот же deploy.sh для ДРУГОГО проекта — либо
+# задайте переменные окружения, либо положите рядом со скриптом свой
+# deploy.conf. Если ни того ни другого нет и каталоги проекта/Git не
+# найдены — при запуске появится мастер настройки, который создаст
+# deploy.conf сам (см. run_setup_wizard()).
+# ------------------------------------------------------------
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd -P)"
+DEPLOY_CONFIG="${DEPLOY_CONFIG:-$SCRIPT_DIR/deploy.conf}"
+
+# Реальное имя файла самого скрипта (обычно deploy.sh, но подхватит и
+# переименованный вариант) — используется ниже, чтобы он и его конфиг
+# никогда не попали в коммит/push, даже если физически лежат внутри
+# GIT_REPO_DIR.
+SELF_NAME="$(basename -- "${BASH_SOURCE[0]}")"
+
+if [ -f "$DEPLOY_CONFIG" ]; then
+    # shellcheck source=/dev/null
+    source "$DEPLOY_CONFIG"
+fi
+
 PROJECT_DIR="${PROJECT_DIR:-/s/medical_diary}"
-GIT_DIR="${GIT_DIR:-/c/Users/Azerty/GitHub/medical_diary}"
+GIT_REPO_DIR="${GIT_REPO_DIR:-/c/Users/Azerty/GitHub/medical_diary}"
 GITHUB_REPO="${GITHUB_REPO:-ceshbox-code/medical_diary}"
 GITHUB_URL="${GITHUB_URL:-https://github.com/${GITHUB_REPO}}"
 GITHUB_BRANCH="${GITHUB_BRANCH:-main}"
 
+# Имя проекта для заголовков — по умолчанию берётся из имени каталога
+# проекта, чтобы один и тот же deploy.sh корректно подписывался для
+# любого проекта без правки самого скрипта.
+PROJECT_NAME="${PROJECT_NAME:-$(basename "$PROJECT_DIR")}"
+
 # Каталог резервных копий проекта перед rollback
-ROLLBACK_BACKUP_DIR="${ROLLBACK_BACKUP_DIR:-${PROJECT_DIR}/../medical_diary_rollback_backups}"
+ROLLBACK_BACKUP_DIR="${ROLLBACK_BACKUP_DIR:-${PROJECT_DIR}/../${PROJECT_NAME}_rollback_backups}"
 
 # ------------------------------------------------------------
 # Цвета
@@ -166,10 +214,67 @@ show_paths_info() {
     box_line " ${BOLD}${MAGENTA}ОКРУЖЕНИЕ${NC}" " ОКРУЖЕНИЕ"
     printf '%b\n' "${CYAN}├────────────────────────────────────────────────────────────┤${NC}"
     box_line " ${MAGENTA}Проект :${NC} ${PROJECT_DIR}" " Проект : ${PROJECT_DIR}"
-    box_line " ${MAGENTA}Git    :${NC} ${GIT_DIR}" " Git    : ${GIT_DIR}"
+    box_line " ${MAGENTA}Git    :${NC} ${GIT_REPO_DIR}" " Git    : ${GIT_REPO_DIR}"
     box_line " ${MAGENTA}GitHub :${NC} ${GITHUB_URL}" " GitHub : ${GITHUB_URL}"
     box_line " ${MAGENTA}Ветка  :${NC} ${GITHUB_BRANCH}" " Ветка  : ${GITHUB_BRANCH}"
     printf '%b\n' "${CYAN}└────────────────────────────────────────────────────────────┘${NC}"
+    echo
+}
+
+# ------------------------------------------------------------
+# Мастер первичной настройки для нового проекта
+# ------------------------------------------------------------
+run_setup_wizard() {
+    local in_project_dir
+    local in_git_dir
+    local in_repo
+    local in_branch
+
+    section_title "НАСТРОЙКА DEPLOY.SH ДЛЯ ЭТОГО ПРОЕКТА"
+
+    echo "Ответьте на несколько вопросов один раз — ответы будут"
+    echo "сохранены в:"
+    echo "  $DEPLOY_CONFIG"
+    echo "и подхватятся автоматически при следующих запусках."
+    echo
+
+    printf '%b' "${CYAN}Рабочий каталог проекта (PROJECT_DIR): ${NC}"
+    read -r in_project_dir
+    printf '%b' "${CYAN}Локальный клон Git-репозитория (GIT_REPO_DIR): ${NC}"
+    read -r in_git_dir
+    printf '%b' "${CYAN}GitHub-репозиторий, вида owner/repo (GITHUB_REPO): ${NC}"
+    read -r in_repo
+    printf '%b' "${CYAN}Ветка [main]: ${NC}"
+    read -r in_branch
+    in_branch="${in_branch:-main}"
+
+    if [ -z "$in_project_dir" ] || [ -z "$in_git_dir" ] || [ -z "$in_repo" ]; then
+        warning "Не все поля заполнены — конфигурация не сохранена."
+        return 1
+    fi
+
+    PROJECT_DIR="$in_project_dir"
+    GIT_REPO_DIR="$in_git_dir"
+    GITHUB_REPO="$in_repo"
+    GITHUB_URL="https://github.com/${GITHUB_REPO}"
+    GITHUB_BRANCH="$in_branch"
+    PROJECT_NAME="$(basename "$PROJECT_DIR")"
+    ROLLBACK_BACKUP_DIR="${PROJECT_DIR}/../${PROJECT_NAME}_rollback_backups"
+
+    cat > "$DEPLOY_CONFIG" <<EOF
+# Конфигурация deploy.sh для проекта «${PROJECT_NAME}».
+# Создано мастером настройки $(date '+%Y-%m-%d %H:%M:%S').
+#
+# Явная переменная окружения при запуске всё равно имеет приоритет
+# над значениями из этого файла — за счёт \${VAR:-...} ниже.
+PROJECT_DIR="\${PROJECT_DIR:-${PROJECT_DIR}}"
+GIT_REPO_DIR="\${GIT_REPO_DIR:-${GIT_REPO_DIR}}"
+GITHUB_REPO="\${GITHUB_REPO:-${GITHUB_REPO}}"
+GITHUB_BRANCH="\${GITHUB_BRANCH:-${GITHUB_BRANCH}}"
+EOF
+
+    success "Конфигурация сохранена: $DEPLOY_CONFIG"
+    echo "Дальнейшие запуски deploy.sh из этого каталога подхватят её сами."
     echo
 }
 
@@ -180,13 +285,25 @@ check_dependencies() {
     command_exists git || die "Git не найден."
     command_exists tar || die "tar не найден."
 
+    if { [ ! -d "$PROJECT_DIR" ] || [ ! -d "$GIT_REPO_DIR" ]; } && [ ! -f "$DEPLOY_CONFIG" ]; then
+        echo
+        warning "Каталоги проекта и/или Git не найдены, а файл конфигурации отсутствует:"
+        echo "  $DEPLOY_CONFIG"
+        echo "Похоже, deploy.sh запущен для этого проекта впервые."
+        echo
+
+        if ask_yes_no "Настроить deploy.sh для этого проекта сейчас?"; then
+            run_setup_wizard || true
+        fi
+    fi
+
     [ -d "$PROJECT_DIR" ] || die "Каталог проекта не найден: $PROJECT_DIR"
-    [ -d "$GIT_DIR" ] || die "Каталог Git-репозитория не найден: $GIT_DIR"
+    [ -d "$GIT_REPO_DIR" ] || die "Каталог Git-репозитория не найден: $GIT_REPO_DIR"
 
-    git -C "$GIT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
-        || die "Каталог не является Git-репозиторием: $GIT_DIR"
+    git -C "$GIT_REPO_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+        || die "Каталог не является Git-репозиторием: $GIT_REPO_DIR"
 
-    git -C "$GIT_DIR" config core.fileMode false >/dev/null 2>&1 || true
+    git -C "$GIT_REPO_DIR" config core.fileMode false >/dev/null 2>&1 || true
 }
 
 # ------------------------------------------------------------
@@ -223,7 +340,7 @@ is_protected_path() {
         Thumbs.db|desktop.ini)
             return 0
             ;;
-        deploy.sh)
+        "$SELF_NAME"|deploy.conf)
             return 0
             ;;
         .git|.git/*)
@@ -233,6 +350,64 @@ is_protected_path() {
             return 1
             ;;
     esac
+}
+
+# ------------------------------------------------------------
+# Защита самого deploy.sh (и deploy.conf) от попадания в GitHub
+#
+# is_protected_path() выше защищает только сравнение
+# ПРОЕКТ -> ЛОКАЛЬНЫЙ GIT (Deploy). Но если deploy.sh уже физически
+# лежит внутри GIT_REPO_DIR (например, был закоммичен когда-то раньше
+# или помещён туда вручную), ни это, ни тем более "Git -> GitHub"
+# (который коммитит git add -A всё, что реально лежит в git-каталоге)
+# сами по себе его не остановят. Эти функции чинят именно это — их
+# нужно вызывать в НАЧАЛЕ deploy() и git_to_github(), до commit/push.
+# ------------------------------------------------------------
+ensure_gitignore_has_self() {
+    local gitignore="$GIT_REPO_DIR/.gitignore"
+    local entry
+
+    for entry in "$SELF_NAME" "deploy.conf"; do
+        if [ -f "$gitignore" ] && grep -qxF "$entry" "$gitignore" 2>/dev/null; then
+            continue
+        fi
+
+        printf '%s\n' "$entry" >> "$gitignore" \
+            || die "Не удалось обновить .gitignore: $gitignore"
+
+        log "Добавлено в .gitignore: $entry"
+    done
+}
+
+untrack_self_from_git() {
+    local tracked
+
+    tracked="$(git -C "$GIT_REPO_DIR" ls-files -- "$SELF_NAME" "deploy.conf" 2>/dev/null || true)"
+
+    [ -n "$tracked" ] || return 0
+
+    echo
+    warning "В локальном Git-репозитории отслеживаются файлы самого deploy-инструмента:"
+    echo "$tracked" | sed 's/^/    /'
+    echo
+    echo "Эти файлы не должны попадать в GitHub — они относятся к вашей"
+    echo "локальной машине, а не к самому проекту."
+    echo
+
+    if ! ask_yes_no "Убрать их из отслеживания git сейчас? (файлы на диске останутся)"; then
+        die "Отменено: $SELF_NAME/deploy.conf всё ещё отслеживаются в git. Уберите их вручную (git rm --cached) и повторите."
+    fi
+
+    # --ignore-unmatch: не падать, если один из двух файлов не отслеживался
+    git -C "$GIT_REPO_DIR" rm --cached --ignore-unmatch -- "$SELF_NAME" "deploy.conf" >/dev/null \
+        || die "Не удалось убрать файлы из отслеживания git."
+
+    success "Файлы deploy-инструмента убраны из отслеживания git (на диске они остались)."
+}
+
+protect_self_from_git() {
+    ensure_gitignore_has_self
+    untrack_self_from_git
 }
 
 # ------------------------------------------------------------
@@ -255,7 +430,7 @@ collect_changes() {
             continue
         fi
 
-        git_file="$GIT_DIR/$relative"
+        git_file="$GIT_REPO_DIR/$relative"
 
         if [ ! -e "$git_file" ]; then
             CHANGES+=("NEW|$relative")
@@ -276,7 +451,7 @@ collect_changes() {
     )
 
     while IFS= read -r -d '' git_file; do
-        relative="${git_file#"$GIT_DIR"/}"
+        relative="${git_file#"$GIT_REPO_DIR"/}"
 
         if is_protected_path "$relative"; then
             continue
@@ -288,8 +463,8 @@ collect_changes() {
             CHANGES+=("DELETED|$relative")
         fi
     done < <(
-        find "$GIT_DIR" \
-            -type d -path "$GIT_DIR/.git" -prune -o \
+        find "$GIT_REPO_DIR" \
+            -type d -path "$GIT_REPO_DIR/.git" -prune -o \
             -type f -print0
     )
 }
@@ -428,7 +603,7 @@ copy_selected_to_git() {
         fi
 
         source="$PROJECT_DIR/$relative"
-        target="$GIT_DIR/$relative"
+        target="$GIT_REPO_DIR/$relative"
 
         if [ -f "$source" ]; then
             target_dir="$(dirname "$target")"
@@ -443,7 +618,7 @@ copy_selected_to_git() {
 
                 target_dir="$(dirname "$target")"
 
-                while [ "$target_dir" != "$GIT_DIR" ] &&
+                while [ "$target_dir" != "$GIT_REPO_DIR" ] &&
                       [ "$target_dir" != "/" ]; do
                     if [ -d "$target_dir" ] &&
                        [ -z "$(find "$target_dir" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
@@ -465,7 +640,7 @@ copy_selected_to_git() {
 show_git_status() {
     echo
     section_title "СОСТОЯНИЕ ЛОКАЛЬНОГО GIT"
-    git -C "$GIT_DIR" status --short
+    git -C "$GIT_REPO_DIR" status --short
     echo
 }
 
@@ -475,18 +650,18 @@ show_git_status() {
 ensure_origin() {
     local current_url
 
-    current_url="$(git -C "$GIT_DIR" remote get-url origin 2>/dev/null || true)"
+    current_url="$(git -C "$GIT_REPO_DIR" remote get-url origin 2>/dev/null || true)"
 
     if [ -z "$current_url" ]; then
         log "Remote origin отсутствует. Добавляю $GITHUB_URL"
-        git -C "$GIT_DIR" remote add origin "$GITHUB_URL" \
+        git -C "$GIT_REPO_DIR" remote add origin "$GITHUB_URL" \
             || die "Не удалось добавить origin."
     elif [ "$current_url" != "$GITHUB_URL" ]; then
         warning "Текущий origin: $current_url"
         warning "Ожидаемый origin: $GITHUB_URL"
 
         if ask_yes_no "Изменить origin на $GITHUB_URL?"; then
-            git -C "$GIT_DIR" remote set-url origin "$GITHUB_URL" \
+            git -C "$GIT_REPO_DIR" remote set-url origin "$GITHUB_URL" \
                 || die "Не удалось изменить origin."
         else
             die "Deploy отменён: origin не соответствует GitHub."
@@ -499,16 +674,16 @@ ensure_origin() {
 # ------------------------------------------------------------
 fetch_origin() {
     log "Получаю актуальное состояние GitHub..."
-    git -C "$GIT_DIR" fetch origin "$GITHUB_BRANCH" \
+    git -C "$GIT_REPO_DIR" fetch origin "$GITHUB_BRANCH" \
         || die "Не удалось получить данные с GitHub."
 }
 
 get_remote_sha() {
-    git -C "$GIT_DIR" rev-parse "origin/$GITHUB_BRANCH" 2>/dev/null || true
+    git -C "$GIT_REPO_DIR" rev-parse "origin/$GITHUB_BRANCH" 2>/dev/null || true
 }
 
 get_local_sha() {
-    git -C "$GIT_DIR" rev-parse HEAD 2>/dev/null || true
+    git -C "$GIT_REPO_DIR" rev-parse HEAD 2>/dev/null || true
 }
 
 # ------------------------------------------------------------
@@ -533,7 +708,7 @@ check_history() {
         die "Локальная ветка не содержит commit."
     fi
 
-    counts="$(git -C "$GIT_DIR" rev-list \
+    counts="$(git -C "$GIT_REPO_DIR" rev-list \
         --left-right \
         --count \
         "HEAD...origin/$GITHUB_BRANCH" 2>/dev/null || true)"
@@ -581,7 +756,7 @@ sync_with_github_before_push() {
             return 0
             ;;
         1|2)
-            if [ -n "$(git -C "$GIT_DIR" status --porcelain --untracked-files=normal 2>/dev/null)" ]; then
+            if [ -n "$(git -C "$GIT_REPO_DIR" status --porcelain --untracked-files=normal 2>/dev/null)" ]; then
                 has_changes=true
             fi
 
@@ -591,11 +766,11 @@ sync_with_github_before_push() {
                 echo "Автоматически сохраняю их через git stash перед синхронизацией..."
                 echo
 
-                if ! git -C "$GIT_DIR" stash push --include-untracked -m "Auto-stash before deploy sync"; then
+                if ! git -C "$GIT_REPO_DIR" stash push --include-untracked -m "Auto-stash before deploy sync"; then
                     error "Не удалось создать stash."
                     echo
                     echo "Необходимо вручную обработать незакоммиченные изменения:"
-                    echo "  cd \"$GIT_DIR\""
+                    echo "  cd \"$GIT_REPO_DIR\""
                     echo "  git status"
                     echo "  git add <files>"
                     echo "  git commit -m \"WIP: unstaged changes\""
@@ -619,19 +794,19 @@ sync_with_github_before_push() {
 
             echo
 
-            if ! git -C "$GIT_DIR" pull --rebase origin "$GITHUB_BRANCH"; then
+            if ! git -C "$GIT_REPO_DIR" pull --rebase origin "$GITHUB_BRANCH"; then
                 error "git pull --rebase завершился с конфликтом."
 
                 if [ "$stash_created" = true ]; then
                     echo
                     warning "Изменения остались в stash. Восстановите их после разрешения конфликтов:"
-                    echo "  cd \"$GIT_DIR\""
+                    echo "  cd \"$GIT_REPO_DIR\""
                     echo "  git stash pop"
                 fi
 
                 echo
                 echo "Необходимо вручную разрешить конфликты:"
-                echo "  cd \"$GIT_DIR\""
+                echo "  cd \"$GIT_REPO_DIR\""
                 echo "  git status"
                 echo "  # отредактировать файлы"
                 echo "  git add <files>"
@@ -649,11 +824,11 @@ sync_with_github_before_push() {
                 echo
                 log "Восстанавливаю изменения из stash..."
 
-                if ! git -C "$GIT_DIR" stash pop; then
+                if ! git -C "$GIT_REPO_DIR" stash pop; then
                     error "Не удалось автоматически восстановить изменения из stash."
                     echo
                     echo "Изменения остались в stash. Восстановите их вручную:"
-                    echo "  cd \"$GIT_DIR\""
+                    echo "  cd \"$GIT_REPO_DIR\""
                     echo "  git stash list"
                     echo "  git stash pop"
                     echo
@@ -677,13 +852,13 @@ create_commit() {
     read -r commit_message
 
     if [ -z "$commit_message" ]; then
-        commit_message="Update Medical Diary"
+        commit_message="Update ${PROJECT_NAME}"
     fi
 
-    git -C "$GIT_DIR" add -A \
+    git -C "$GIT_REPO_DIR" add -A \
         || die "git add завершился ошибкой."
 
-    if git -C "$GIT_DIR" diff --cached --quiet; then
+    if git -C "$GIT_REPO_DIR" diff --cached --quiet; then
         success "После переноса изменений для commit нет."
         return 1
     fi
@@ -692,16 +867,16 @@ create_commit() {
     printf '%b\n' "${BOLD}Будет создан commit:${NC}"
     echo "  $commit_message"
     echo
-    git -C "$GIT_DIR" diff --cached --stat
+    git -C "$GIT_REPO_DIR" diff --cached --stat
     echo
 
     if ! ask_yes_no "Создать этот commit?"; then
-        git -C "$GIT_DIR" reset >/dev/null 2>&1 || true
+        git -C "$GIT_REPO_DIR" reset >/dev/null 2>&1 || true
         warning "Создание commit отменено."
         return 1
     fi
 
-    git -C "$GIT_DIR" commit -m "$commit_message" \
+    git -C "$GIT_REPO_DIR" commit -m "$commit_message" \
         || die "git commit завершился ошибкой."
 
     success "Commit создан."
@@ -714,6 +889,17 @@ create_commit() {
 push_to_github() {
     local local_sha
     local remote_sha
+    local leaked
+
+    # Последний рубеж защиты: даже если протокол выше (protect_self_from_git)
+    # был пропущен или отменён, никогда не отправлять commit, в котором
+    # реально закоммичены deploy.sh/deploy.conf.
+    leaked="$(git -C "$GIT_REPO_DIR" ls-tree -r --name-only HEAD -- "$SELF_NAME" "deploy.conf" 2>/dev/null || true)"
+    if [ -n "$leaked" ]; then
+        error "БЛОКИРОВКА PUSH: в текущем commit присутствуют файлы deploy-инструмента:"
+        echo "$leaked" | sed 's/^/    /' >&2
+        die "Push остановлен. Выполните: git rm --cached -- $SELF_NAME deploy.conf, закоммитьте и повторите."
+    fi
 
     echo
     printf '%b\n' "${BOLD}Подготовка push:${NC}"
@@ -730,7 +916,7 @@ push_to_github() {
         return 1
     fi
 
-    git -C "$GIT_DIR" push origin "$GITHUB_BRANCH" \
+    git -C "$GIT_REPO_DIR" push origin "$GITHUB_BRANCH" \
         || die "git push завершился ошибкой."
 
     success "git push завершён."
@@ -738,7 +924,7 @@ push_to_github() {
     log "Проверяю SHA ветки GitHub..."
 
     remote_sha="$(
-        git -C "$GIT_DIR" ls-remote "origin" "refs/heads/$GITHUB_BRANCH" \
+        git -C "$GIT_REPO_DIR" ls-remote "origin" "refs/heads/$GITHUB_BRANCH" \
             | awk '{print $1}'
     )"
 
@@ -766,7 +952,7 @@ push_to_github() {
 # В отличие от deploy() эта операция НЕ трогает $PROJECT_DIR и
 # не делает copy_selected_to_git — она коммитит и отправляет в
 # GitHub только то, что уже лежит в локальном git-репозитории
-# $GIT_DIR (например, если файлы туда были изменены вручную,
+# $GIT_REPO_DIR (например, если файлы туда были изменены вручную,
 # не через пункт Deploy).
 # ------------------------------------------------------------
 git_to_github() {
@@ -776,14 +962,16 @@ git_to_github() {
 
     echo
     printf '%b\n' "${BOLD}${CYAN}============================================================${NC}"
-    printf '%b\n' "${BOLD}${CYAN} Medical Diary — GIT -> GITHUB${NC}"
+    printf '%b\n' "${BOLD}${CYAN} ${PROJECT_NAME} — GIT -> GITHUB${NC}"
     printf '%b\n' "${BOLD}${CYAN}============================================================${NC}"
 
     show_paths_info
 
+    protect_self_from_git
+
     printf '%b\n' "${YELLOW}Файлы проекта ($PROJECT_DIR) в этой операции НЕ участвуют.${NC}"
     printf '%b\n' "${YELLOW}Будет закоммичено и отправлено то, что уже есть в локальном${NC}"
-    printf '%b\n' "${YELLOW}Git-репозитории: $GIT_DIR${NC}"
+    printf '%b\n' "${YELLOW}Git-репозитории: $GIT_REPO_DIR${NC}"
 
     ensure_origin
     fetch_origin
@@ -791,7 +979,7 @@ git_to_github() {
 
     show_git_status
 
-    if [ -n "$(git -C "$GIT_DIR" status --porcelain --untracked-files=normal 2>/dev/null)" ]; then
+    if [ -n "$(git -C "$GIT_REPO_DIR" status --porcelain --untracked-files=normal 2>/dev/null)" ]; then
         has_uncommitted=true
     fi
 
@@ -829,10 +1017,12 @@ git_to_github() {
 deploy() {
     echo
     printf '%b\n' "${BOLD}${CYAN}============================================================${NC}"
-    printf '%b\n' "${BOLD}${CYAN} Medical Diary — DEPLOY${NC}"
+    printf '%b\n' "${BOLD}${CYAN} ${PROJECT_NAME} — DEPLOY${NC}"
     printf '%b\n' "${BOLD}${CYAN}============================================================${NC}"
 
     show_paths_info
+
+    protect_self_from_git
 
     ensure_origin
     fetch_origin
@@ -905,7 +1095,7 @@ list_github_commits_numbered() {
     while IFS= read -r sha; do
         [ -n "$sha" ] && ROLLBACK_COMMITS+=("$sha")
     done < <(
-        git -C "$GIT_DIR" --no-pager log \
+        git -C "$GIT_REPO_DIR" --no-pager log \
             "origin/$GITHUB_BRANCH" \
             --pretty=format:%H \
             -20 2>/dev/null
@@ -924,10 +1114,10 @@ list_github_commits_numbered() {
     local subject
 
     for sha in "${ROLLBACK_COMMITS[@]}"; do
-        short="$(git -C "$GIT_DIR" --no-pager show -s --format='%h' "$sha" 2>/dev/null || echo '?')"
-        date="$(git -C "$GIT_DIR" --no-pager show -s --format='%ad' --date=iso "$sha" 2>/dev/null || echo '?')"
-        author="$(git -C "$GIT_DIR" --no-pager show -s --format='%an' "$sha" 2>/dev/null || echo '?')"
-        subject="$(git -C "$GIT_DIR" --no-pager show -s --format='%s' "$sha" 2>/dev/null || echo '?')"
+        short="$(git -C "$GIT_REPO_DIR" --no-pager show -s --format='%h' "$sha" 2>/dev/null || echo '?')"
+        date="$(git -C "$GIT_REPO_DIR" --no-pager show -s --format='%ad' --date=iso "$sha" 2>/dev/null || echo '?')"
+        author="$(git -C "$GIT_REPO_DIR" --no-pager show -s --format='%an' "$sha" 2>/dev/null || echo '?')"
+        subject="$(git -C "$GIT_REPO_DIR" --no-pager show -s --format='%s' "$sha" 2>/dev/null || echo '?')"
 
         printf '%3d) %s | %s | %s | %s\n' "$i" "$short" "$date" "$author" "$subject"
 
@@ -960,13 +1150,13 @@ choose_rollback_commit() {
        [ "$choice" -le "${#ROLLBACK_COMMITS[@]}" ]; then
         full="${ROLLBACK_COMMITS[$((choice - 1))]}"
     else
-        if ! full="$(git -C "$GIT_DIR" rev-parse --verify "${choice}^{commit}" 2>/dev/null)"; then
+        if ! full="$(git -C "$GIT_REPO_DIR" rev-parse --verify "${choice}^{commit}" 2>/dev/null)"; then
             error "Указанный коммит не найден."
             return 1
         fi
     fi
 
-    if ! git -C "$GIT_DIR" merge-base --is-ancestor "$full" "origin/$GITHUB_BRANCH" 2>/dev/null; then
+    if ! git -C "$GIT_REPO_DIR" merge-base --is-ancestor "$full" "origin/$GITHUB_BRANCH" 2>/dev/null; then
         error "Коммит $full не найден в origin/$GITHUB_BRANCH."
         return 1
     fi
@@ -981,7 +1171,7 @@ show_rollback_preview() {
     printf '%b\n' "${BOLD}${CYAN}Выбранный commit:${NC}"
     echo "------------------------------------------------------------"
 
-    git -C "$GIT_DIR" --no-pager show \
+    git -C "$GIT_REPO_DIR" --no-pager show \
         -s \
         --format='Commit : %H%nDate   : %ad%nAuthor : %an%nMessage: %s' \
         --date=iso \
@@ -991,7 +1181,7 @@ show_rollback_preview() {
     echo "Изменения относительно предыдущего commit:"
     echo "------------------------------------------------------------"
 
-    git -C "$GIT_DIR" --no-pager diff-tree \
+    git -C "$GIT_REPO_DIR" --no-pager diff-tree \
         --no-commit-id \
         --name-status \
         -r \
@@ -1043,7 +1233,7 @@ rollback_project_to_commit() {
 
     log "Извлекаю выбранный commit во временный каталог..."
 
-    git -C "$GIT_DIR" archive "$commit" \
+    git -C "$GIT_REPO_DIR" archive "$commit" \
         | tar -x -C "$temp_dir" \
         || die "Не удалось извлечь commit."
 
@@ -1108,7 +1298,7 @@ rollback() {
 
     echo
     printf '%b\n' "${BOLD}${RED}============================================================${NC}"
-    printf '%b\n' "${BOLD}${RED} Medical Diary — ROLLBACK FROM GITHUB${NC}"
+    printf '%b\n' "${BOLD}${RED} ${PROJECT_NAME} — ROLLBACK FROM GITHUB${NC}"
     printf '%b\n' "${BOLD}${RED}============================================================${NC}"
 
     show_paths_info
@@ -1231,7 +1421,7 @@ show_github_commits() {
 
     section_title "ИСТОРИЯ GITHUB"
 
-    git -C "$GIT_DIR" --no-pager log \
+    git -C "$GIT_REPO_DIR" --no-pager log \
         "origin/$GITHUB_BRANCH" \
         --pretty=format:'%h | %ad | %an | %s' \
         --date=iso \
@@ -1245,9 +1435,20 @@ show_github_commits() {
 # MENU
 # ============================================================
 show_menu() {
+    local menu_title
+    local menu_pad
+    local menu_spaces
+
+    menu_title="${PROJECT_NAME^^} - DEPLOY TOOL"
+    menu_pad=$(( (FRAME_WIDTH - ${#menu_title}) / 2 ))
+    if (( menu_pad < 0 )); then
+        menu_pad=0
+    fi
+    menu_spaces="$(printf '%*s' "$menu_pad" '')"
+
     echo
     printf '%b\n' "${BOLD}${CYAN}╔════════════════════════════════════════════════════════════╗${NC}"
-    box_line "              ${BOLD}${MAGENTA}MEDICAL DIARY - DEPLOY TOOL${NC}" "              MEDICAL DIARY - DEPLOY TOOL"
+    box_line "${menu_spaces}${BOLD}${MAGENTA}${menu_title}${NC}" "${menu_spaces}${menu_title}"
     printf '%b\n' "${BOLD}${CYAN}╠════════════════════════════════════════════════════════════╣${NC}"
     box_line "  ${GREEN}1${NC}  ${BOLD}Deploy${NC}    ${BLUE}Проект -> Git -> GitHub${NC}" "  1  Deploy    Проект -> Git -> GitHub"
     box_line "  ${CYAN}2${NC}  ${BOLD}Git Push${NC}  ${BLUE}Git -> GitHub${NC}" "  2  Git Push  Git -> GitHub"
