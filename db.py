@@ -158,6 +158,41 @@ CREATE TABLE IF NOT EXISTS ai_assessment_cache (
   UNIQUE (user_id, entry_type, entry_id)
 );
 
+-- Кэш ИИ-оценки динамики показателей за период (вкладка "История" →
+-- "Оценка динамики от ИИ"). В отличие от ai_assessment_cache (кэш по
+-- каждой отдельной записи), здесь input_hash считается по уже
+-- агрегированной статистике всего периода (compute_period_stats) —
+-- см. ai_utils._dynamics_input_hash. Пока период, фильтр типа и сами
+-- данные не изменились — повторный запрос к GigaChat не делается.
+CREATE TABLE IF NOT EXISTS ai_dynamics_cache (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  input_hash TEXT NOT NULL,
+  summary TEXT NOT NULL,
+  observations_json TEXT NOT NULL,
+  caution TEXT,
+  model TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (user_id, input_hash)
+);
+
+-- Троттлинг запросов динамики к GigaChat: одна строка на каждый
+-- "свежий" (не из кэша) запрос пользователя. Считается через COUNT(*)
+-- за последние N секунд/час — см. AI_DYNAMICS_COOLDOWN_SECONDS /
+-- AI_DYNAMICS_HOURLY_LIMIT в assessments.py. Строки не удаляются
+-- намеренно: объём крайне мал (одна запись на реальный вызов ИИ, а не
+-- на каждое открытие вкладки — попадания в ai_dynamics_cache строк не
+-- добавляют), исторический след запросов к платному API полезен и для
+-- аудита.
+CREATE TABLE IF NOT EXISTS ai_dynamics_throttle (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  requested_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_ai_dynamics_throttle_user_time ON ai_dynamics_throttle(user_id, requested_at);
+
 CREATE TABLE IF NOT EXISTS webauthn_credentials (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -199,15 +234,6 @@ def init_db():
     if "settings_json" not in cols:
         conn.execute("ALTER TABLE users ADD COLUMN settings_json TEXT")
 
-    # Пользователь из ADMIN_USERNAME всегда получает права администратора
-    # при каждом старте приложения. Это намеренный механизм восстановления
-    # доступа (например, если admin-флаг был случайно снят), а не ошибка —
-    # но учитывайте это при ротации ADMIN_USERNAME в окружении.
-    conn.execute(
-        "UPDATE users SET is_admin = 1 WHERE username = ?",
-        (os.getenv("ADMIN_USERNAME", "admin"),),
-    )
-
     username = os.getenv("ADMIN_USERNAME", "admin")
     password = os.getenv("ADMIN_PASSWORD")
 
@@ -219,6 +245,23 @@ def init_db():
             )
         except sqlite3.IntegrityError:
             pass
+
+    # Пользователь из ADMIN_USERNAME всегда получает права администратора
+    # при каждом старте приложения. Это намеренный механизм восстановления
+    # доступа (например, если admin-флаг был случайно снят), а не ошибка —
+    # но учитывайте это при ротации ADMIN_USERNAME в окружении.
+    #
+    # ВАЖНО: этот UPDATE обязан идти ПОСЛЕ INSERT выше, а не до него. При
+    # самом первом запуске (пустая БД, только что после install_synology.sh)
+    # строки администратора ещё не существует в момент UPDATE — INSERT
+    # создаёт её со значением is_admin по умолчанию (0, см. SCHEMA), и
+    # админ-панель недоступна вплоть до следующего перезапуска контейнера
+    # (только тогда UPDATE находит уже существующую строку). Раньше UPDATE
+    # шёл первым и ловил ровно эту ситуацию на каждой свежей установке.
+    conn.execute(
+        "UPDATE users SET is_admin = 1 WHERE username = ?",
+        (username,),
+    )
 
     conn.commit()
     conn.close()

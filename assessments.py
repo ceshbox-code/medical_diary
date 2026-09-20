@@ -26,7 +26,12 @@ from flask import session
 
 from db import get_db
 from validators import DEFAULT_RANGES, status_of
-from ai_utils import _ai_ranges_payload, _ai_input_hash, _ai_blocked_by_safety_override
+from ai_utils import (
+    _ai_ranges_payload,
+    _ai_input_hash,
+    _ai_blocked_by_safety_override,
+    _dynamics_input_hash,
+)
 
 
 def glucose_assessment(value_mmol_l, glucose_type, ranges=None):
@@ -562,6 +567,240 @@ def add_ai_assessments(entries, ranges=None, enabled=True):
                 pass
 
     return entries, used
+
+
+AI_DYNAMICS_COOLDOWN_SECONDS = max(1, int(os.getenv("AI_DYNAMICS_COOLDOWN_SECONDS", "20")))
+AI_DYNAMICS_HOURLY_LIMIT = max(1, int(os.getenv("AI_DYNAMICS_HOURLY_LIMIT", "20")))
+
+
+def _gigachat_generate_dynamics_summary(stats, ranges_payload, date_from, date_to):
+    """Просит GigaChat сформулировать безопасный текст по УЖЕ ПОСЧИТАННОЙ
+    в Python статистике периода (см. ai_utils.compute_period_stats).
+
+    Модели передаются только агрегированные числа и справочные
+    диапазоны — ни одной сырой записи дневника, ни комментариев
+    пользователя, ни идентификаторов. System-промпт прямо запрещает
+    придумывать данные и пересчитывать переданные числа: задача модели —
+    только нейтральная формулировка того, что уже вычислено. Как и
+    остальные ИИ-вызовы в проекте, ошибка любого рода не поднимается
+    наверх — вызывающая сторона получает None и показывает пользователю
+    понятное сообщение без падения запроса.
+    """
+    if not (GIGACHAT_AI_ENABLED and GIGACHAT_AUTH_KEY and stats):
+        return None
+
+    schema = {
+        "type": "object",
+        "properties": {
+            "summary": {"type": "string", "maxLength": 900},
+            "observations": {
+                "type": "array",
+                "items": {"type": "string", "maxLength": 200},
+                "maxItems": 6,
+            },
+            "caution": {"type": "string", "maxLength": 300},
+        },
+        "required": ["summary", "observations", "caution"],
+        "additionalProperties": False,
+    }
+
+    system_prompt = (
+        "Ты описываешь уже посчитанную статистику показателей медицинского дневника за период. "
+        "Тебе присланы только готовые агрегаты (count/min/avg/max/first_value/last_value/delta/"
+        "status_counts) — не ставь диагнозы, не назначай, не отменяй и не изменяй лечение или "
+        "лекарства. Используй только переданные числа: ничего не пересчитывай и не придумывай "
+        "значения, которых нет во входных данных. Если каких-то данных недостаточно для "
+        "содержательного наблюдения — прямо скажи об этом, не домысливая. "
+        "summary — краткое нейтральное описание динамики за период целиком, не более 900 символов. "
+        "observations — до 6 отдельных коротких наблюдений (не более 200 символов каждое), как "
+        "правило по одному на показатель, без домыслов и без повтора всех чисел подряд. "
+        "caution — не более 300 символов: если в status_counts заметная доля значений 'high' или "
+        "'low', мягко порекомендуй обсудить это с врачом; если поводов нет — верни пустую строку. "
+        "Не смягчай рекомендацию при систолическом давлении >=180 или диастолическом >=120, если "
+        "такие значения видны в диапазонах или статистике. "
+        "Ответь только JSON по заданной схеме, без диагнозов и назначений."
+    )
+
+    payload = {
+        "period": {"date_from": date_from, "date_to": date_to},
+        "stats": stats,
+        "ranges": ranges_payload,
+    }
+    prompt = system_prompt + "\n\nДанные:\n" + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+    try:
+        token = _gigachat_get_access_token()
+        if not token:
+            return None
+
+        body = {
+            "model": GIGACHAT_MODEL,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.2,
+            "max_tokens": 1200,
+            "response_format": {
+                "type": "json_schema",
+                "schema": schema,
+                "strict": True,
+            },
+        }
+
+        http_request = urllib.request.Request(
+            GIGACHAT_API_URL,
+            data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "Authorization": "Bearer " + token,
+                "User-Agent": "MedicalDiary/1.0",
+            },
+            method="POST",
+        )
+
+        with urllib.request.urlopen(http_request, timeout=GIGACHAT_TIMEOUT_SECONDS) as response:
+            raw = response.read(512 * 1024)
+
+        result = json.loads(raw.decode("utf-8"))
+        text = result["choices"][0]["message"]["content"]
+        parsed = text if isinstance(text, dict) else json.loads(text)
+
+        summary = _normalize_ai_text(parsed.get("summary"), 900)
+        if not summary:
+            return None
+
+        observations = []
+        observations_raw = parsed.get("observations")
+        if isinstance(observations_raw, list):
+            for item in observations_raw[:6]:
+                normalized = _normalize_ai_text(item, 200)
+                if normalized:
+                    observations.append(normalized)
+
+        caution = _normalize_ai_text(parsed.get("caution"), 300)
+
+        return {"summary": summary, "observations": observations, "caution": caution}
+
+    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError,
+            ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
+        if isinstance(exc, urllib.error.HTTPError) and exc.code == 401:
+            _gigachat_invalidate_token()
+        print(f"[gigachat] dynamics summary failed: {type(exc).__name__}: {exc}", flush=True)
+        return None
+
+
+def add_ai_dynamics_summary(stats, ranges_payload, date_from, date_to, entry_type, enabled=True):
+    """Публичная точка входа для вкладки «История» → «Оценка динамики от ИИ».
+
+    По аналогии с add_ai_assessments: кэш в БД (ai_dynamics_cache) плюс
+    троттлинг «свежих» (не из кэша) обращений к GigaChat
+    (ai_dynamics_throttle), но не по одной записи, а по агрегатам целого
+    периода (см. ai_utils.compute_period_stats/_dynamics_input_hash).
+
+    Возвращает словарь:
+        {"ok": bool, "cached": bool, "summary": str, "observations": [...],
+         "caution": str, "error": str | None}
+    error, если ok=False: "disabled" (ИИ выключен/не настроен),
+    "throttled" (слишком частые запросы) или "gigachat_failed" (сбой
+    самого запроса к GigaChat). Отсутствие ответа ИИ никогда не должно
+    приводить к падению запроса — вызывающий код (app.py) просто
+    показывает пользователю понятное сообщение по коду ошибки.
+    """
+    if not (enabled and GIGACHAT_AI_ENABLED and GIGACHAT_AUTH_KEY and stats):
+        return {"ok": False, "cached": False, "error": "disabled"}
+
+    user_id = session.get("user_id")
+    input_hash = _dynamics_input_hash(stats, ranges_payload, date_from, date_to, entry_type)
+    db = get_db()
+
+    if user_id:
+        try:
+            cached = db.execute(
+                "SELECT summary, observations_json, caution FROM ai_dynamics_cache "
+                "WHERE user_id = ? AND input_hash = ?",
+                (user_id, input_hash),
+            ).fetchone()
+        except Exception:
+            cached = None
+
+        if cached:
+            try:
+                observations = json.loads(cached["observations_json"])
+            except (TypeError, ValueError, json.JSONDecodeError):
+                observations = []
+            return {
+                "ok": True,
+                "cached": True,
+                "summary": cached["summary"],
+                "observations": observations,
+                "caution": cached["caution"] or "",
+                "error": None,
+            }
+
+    if user_id:
+        try:
+            recent = db.execute(
+                "SELECT COUNT(*) AS c FROM ai_dynamics_throttle "
+                "WHERE user_id = ? AND requested_at > datetime('now', ?)",
+                (user_id, f"-{AI_DYNAMICS_COOLDOWN_SECONDS} seconds"),
+            ).fetchone()
+            if recent and recent["c"] > 0:
+                return {"ok": False, "cached": False, "error": "throttled"}
+
+            hourly = db.execute(
+                "SELECT COUNT(*) AS c FROM ai_dynamics_throttle "
+                "WHERE user_id = ? AND requested_at > datetime('now', '-1 hour')",
+                (user_id,),
+            ).fetchone()
+            if hourly and hourly["c"] >= AI_DYNAMICS_HOURLY_LIMIT:
+                return {"ok": False, "cached": False, "error": "throttled"}
+
+            # Строка троттлинга пишется ДО обращения к GigaChat и остаётся
+            # даже при сбое запроса — иначе повторяющиеся ошибки можно было
+            # бы использовать, чтобы обходить лимит частыми повторами.
+            db.execute("INSERT INTO ai_dynamics_throttle (user_id) VALUES (?)", (user_id,))
+            db.commit()
+        except Exception:
+            pass
+
+    result = _gigachat_generate_dynamics_summary(stats, ranges_payload, date_from, date_to)
+    if result is None:
+        return {"ok": False, "cached": False, "error": "gigachat_failed"}
+
+    if user_id:
+        try:
+            db.execute(
+                """
+                INSERT INTO ai_dynamics_cache
+                    (user_id, input_hash, summary, observations_json, caution, model)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_id, input_hash) DO UPDATE SET
+                    summary = excluded.summary,
+                    observations_json = excluded.observations_json,
+                    caution = excluded.caution,
+                    model = excluded.model,
+                    updated_at = datetime('now')
+                """,
+                (
+                    user_id, input_hash, result["summary"],
+                    json.dumps(result["observations"], ensure_ascii=False),
+                    result.get("caution", ""), GIGACHAT_MODEL,
+                ),
+            )
+            db.commit()
+        except Exception:
+            pass
+
+    return {
+        "ok": True,
+        "cached": False,
+        "summary": result["summary"],
+        "observations": result["observations"],
+        "caution": result.get("caution", ""),
+        "error": None,
+    }
 
 
 def add_assessments(entries, ranges=None):

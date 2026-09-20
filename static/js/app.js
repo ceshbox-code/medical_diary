@@ -1037,6 +1037,8 @@ function updateDateLabels() {
         var count=document.getElementById('history-count'); if(count) count.textContent='Записей: ' + out.entries.length;
         renderTrendCharts(out.entries);
         currentExportUrl = '/export.pdf?date_from=' + encodeURIComponent(df) + '&date_to=' + encodeURIComponent(dt) + '&type=' + encodeURIComponent(hp.type) + '&sort=' + encodeURIComponent(hp.sort);
+        currentAiDynamicsUrl = '/api/history/ai-dynamics?date_from=' + encodeURIComponent(df) + '&date_to=' + encodeURIComponent(dt) + '&type=' + encodeURIComponent(hp.type);
+        resetAiDynamicsPanel();
         setMsg('history-msg', '', true);
       } catch (err) {
         if (cards) { cards.innerHTML=''; }
@@ -1546,6 +1548,62 @@ function updateDateLabels() {
     }
 
     var currentExportUrl = '';
+    var currentAiDynamicsUrl = '';
+
+    function resetAiDynamicsPanel() {
+      var card = document.getElementById('ai-dynamics-card');
+      var result = document.getElementById('ai-dynamics-result');
+      if (card) { card.hidden = true; }
+      if (result) { result.hidden = true; }
+      setMsg('ai-dynamics-msg', '', true);
+    }
+
+    async function requestAiDynamics() {
+      if (!currentAiDynamicsUrl) { setMsg('history-msg', 'Сначала дождитесь загрузки истории', false); return; }
+
+      var card = document.getElementById('ai-dynamics-card');
+      var result = document.getElementById('ai-dynamics-result');
+      var btn = document.getElementById('ai-dynamics-btn');
+      if (card) { card.hidden = false; }
+      if (result) { result.hidden = true; }
+      setMsg('ai-dynamics-msg', 'Запрашиваем оценку динамики у ИИ…', true);
+      if (btn) { btn.disabled = true; }
+
+      try {
+        var res = await fetch(currentAiDynamicsUrl);
+        if (res.status === 401) { window.location = '/login'; return; }
+        var out = await res.json();
+        if (!res.ok) { throw new Error(out.error || ('HTTP ' + res.status)); }
+
+        document.getElementById('ai-dynamics-summary').textContent = out.summary || '';
+
+        var list = document.getElementById('ai-dynamics-observations');
+        list.innerHTML = '';
+        (out.observations || []).forEach(function(text) {
+          var li = document.createElement('li');
+          li.textContent = text;
+          list.appendChild(li);
+        });
+
+        var cautionEl = document.getElementById('ai-dynamics-caution');
+        if (out.caution) {
+          cautionEl.textContent = '⚠️ ' + out.caution;
+          cautionEl.hidden = false;
+        } else {
+          cautionEl.hidden = true;
+        }
+
+        var metaEl = document.getElementById('ai-dynamics-meta');
+        metaEl.textContent = (out.cached ? 'Из кэша · ' : '') + 'период ' + fmtDateRu(out.date_from) + ' — ' + fmtDateRu(out.date_to);
+
+        if (result) { result.hidden = false; }
+        setMsg('ai-dynamics-msg', '', true);
+      } catch (err) {
+        setMsg('ai-dynamics-msg', friendlyErrorMessage(err), false);
+      } finally {
+        if (btn) { btn.disabled = false; }
+      }
+    }
     var pdfBlob = null;
     var pdfDoc = null;
     var pdfPages = [];

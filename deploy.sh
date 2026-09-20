@@ -738,7 +738,7 @@ push_to_github() {
     log "Проверяю SHA ветки GitHub..."
 
     remote_sha="$(
-        git ls-remote "origin" "refs/heads/$GITHUB_BRANCH" \
+        git -C "$GIT_DIR" ls-remote "origin" "refs/heads/$GITHUB_BRANCH" \
             | awk '{print $1}'
     )"
 
@@ -758,6 +758,69 @@ push_to_github() {
     fi
 
     success "PUSH VERIFIED: GitHub содержит именно локальный HEAD."
+}
+
+# ------------------------------------------------------------
+# GIT -> GITHUB (без переноса файлов из проекта)
+#
+# В отличие от deploy() эта операция НЕ трогает $PROJECT_DIR и
+# не делает copy_selected_to_git — она коммитит и отправляет в
+# GitHub только то, что уже лежит в локальном git-репозитории
+# $GIT_DIR (например, если файлы туда были изменены вручную,
+# не через пункт Deploy).
+# ------------------------------------------------------------
+git_to_github() {
+    local local_sha
+    local remote_sha
+    local has_uncommitted=false
+
+    echo
+    printf '%b\n' "${BOLD}${CYAN}============================================================${NC}"
+    printf '%b\n' "${BOLD}${CYAN} Medical Diary — GIT -> GITHUB${NC}"
+    printf '%b\n' "${BOLD}${CYAN}============================================================${NC}"
+
+    show_paths_info
+
+    printf '%b\n' "${YELLOW}Файлы проекта ($PROJECT_DIR) в этой операции НЕ участвуют.${NC}"
+    printf '%b\n' "${YELLOW}Будет закоммичено и отправлено то, что уже есть в локальном${NC}"
+    printf '%b\n' "${YELLOW}Git-репозитории: $GIT_DIR${NC}"
+
+    ensure_origin
+    fetch_origin
+    sync_with_github_before_push
+
+    show_git_status
+
+    if [ -n "$(git -C "$GIT_DIR" status --porcelain --untracked-files=normal 2>/dev/null)" ]; then
+        has_uncommitted=true
+    fi
+
+    if [ "$has_uncommitted" = true ]; then
+        if ! ask_yes_no "В локальном Git есть незакоммиченные изменения. Создать commit?"; then
+            warning "Commit пропущен по вашему выбору."
+        elif ! create_commit; then
+            warning "Git -> GitHub остановлен: commit не создан."
+            return 0
+        fi
+    else
+        success "Незакоммиченных изменений в локальном Git нет."
+    fi
+
+    local_sha="$(get_local_sha)"
+    remote_sha="$(get_remote_sha)"
+
+    if [ -n "$remote_sha" ] && [ "$local_sha" = "$remote_sha" ]; then
+        success "Локальный Git уже синхронизирован с GitHub — отправлять нечего."
+        return 0
+    fi
+
+    push_to_github
+
+    echo
+    printf '%b\n' "${BOLD}${GREEN}============================================================${NC}"
+    printf '%b\n' "${BOLD}${GREEN} GIT -> GITHUB УСПЕШНО ЗАВЕРШЁН${NC}"
+    printf '%b\n' "${BOLD}${GREEN}============================================================${NC}"
+    echo
 }
 
 # ------------------------------------------------------------
@@ -1187,9 +1250,10 @@ show_menu() {
     box_line "              ${BOLD}${MAGENTA}MEDICAL DIARY - DEPLOY TOOL${NC}" "              MEDICAL DIARY - DEPLOY TOOL"
     printf '%b\n' "${BOLD}${CYAN}╠════════════════════════════════════════════════════════════╣${NC}"
     box_line "  ${GREEN}1${NC}  ${BOLD}Deploy${NC}    ${BLUE}Проект -> Git -> GitHub${NC}" "  1  Deploy    Проект -> Git -> GitHub"
-    box_line "  ${YELLOW}2${NC}  ${BOLD}Rollback${NC}  ${BLUE}GitHub -> Проект${NC}" "  2  Rollback  GitHub -> Проект"
-    box_line "  ${MAGENTA}3${NC}  ${BOLD}History${NC}   ${BLUE}История GitHub${NC}" "  3  History   История GitHub"
-    box_line "  ${RED}4${NC}  ${BOLD}Exit${NC}      ${BLUE}Выход${NC}" "  4  Exit      Выход"
+    box_line "  ${CYAN}2${NC}  ${BOLD}Git Push${NC}  ${BLUE}Git -> GitHub${NC}" "  2  Git Push  Git -> GitHub"
+    box_line "  ${YELLOW}3${NC}  ${BOLD}Rollback${NC}  ${BLUE}GitHub -> Проект${NC}" "  3  Rollback  GitHub -> Проект"
+    box_line "  ${MAGENTA}4${NC}  ${BOLD}History${NC}   ${BLUE}История GitHub${NC}" "  4  History   История GitHub"
+    box_line "  ${RED}5${NC}  ${BOLD}Exit${NC}      ${BLUE}Выход${NC}" "  5  Exit      Выход"
     printf '%b\n' "${BOLD}${CYAN}╚════════════════════════════════════════════════════════════╝${NC}"
 
     show_paths_info
@@ -1202,6 +1266,11 @@ main() {
 
     if [ "${1:-}" = "deploy" ]; then
         deploy
+        exit $?
+    fi
+
+    if [ "${1:-}" = "git-push" ]; then
+        git_to_github
         exit $?
     fi
 
@@ -1218,7 +1287,7 @@ main() {
     while true; do
         show_menu
 
-        printf '%b' "${CYAN}Выберите действие [1-4]: ${NC}"
+        printf '%b' "${CYAN}Выберите действие [1-5]: ${NC}"
         read -r choice || exit 0
 
         case "$choice" in
@@ -1227,14 +1296,18 @@ main() {
                 pause
                 ;;
             2)
-                rollback
+                git_to_github
                 pause
                 ;;
             3)
-                show_github_commits
+                rollback
                 pause
                 ;;
             4)
+                show_github_commits
+                pause
+                ;;
+            5)
                 echo "Выход."
                 exit 0
                 ;;

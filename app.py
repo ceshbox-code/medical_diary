@@ -45,6 +45,7 @@ from ai_utils import (
     _ai_ranges_payload,
     _ai_input_hash,
     _ai_blocked_by_safety_override,
+    compute_period_stats,
 )
 from db import DATABASE, SCHEMA, get_db, close_db, init_db
 from security import (
@@ -66,6 +67,7 @@ from security import (
 from assessments import (
     add_assessments,
     add_ai_assessments,
+    add_ai_dynamics_summary,
     GIGACHAT_AI_ENABLED,
     GIGACHAT_AUTH_KEY,
     GIGACHAT_MODEL,
@@ -573,6 +575,79 @@ def api_history():
         return jsonify(entries=entries, date_from=d_from, date_to=d_to)
     except ValueError as e:
         return jsonify(error=str(e)), 400
+
+
+@app.get("/api/history/ai-dynamics")
+@login_required
+def api_history_ai_dynamics():
+    """Оценка динамики показателей за выбранный на вкладке «История»
+    период (тот же период/тип, что и в текущих фильтрах — /api/history).
+
+    Числовая статистика (min/avg/max/дельта/распределение по диапазону)
+    считается детерминированно в Python (compute_period_stats) — это
+    факты и расчёты. GigaChat получает ТОЛЬКО эти уже готовые числа и
+    формулирует по ним нейтральный текст (assessments.add_ai_dynamics_summary) —
+    это отдельный, явно помеченный вывод, не диагноз и не назначение.
+    """
+    _settings, ranges = get_user_settings(session["user_id"])
+
+    try:
+        entries, d_from, d_to = query_entries(
+            session["user_id"],
+            request.args.get("date_from"),
+            request.args.get("date_to"),
+            request.args.get("type", "all"),
+            "date",
+            ranges,
+        )
+    except ValueError as e:
+        return jsonify(error=str(e)), 400
+
+    if len(entries) < 2:
+        return jsonify(error="Недостаточно записей за выбранный период для анализа динамики (нужно минимум 2)."), 400
+
+    entries = add_assessments(entries, ranges)
+    stats = compute_period_stats(entries)
+    if not stats:
+        return jsonify(error="Нет числовых показателей за выбранный период для анализа динамики."), 400
+
+    ranges_payload = _ai_ranges_payload(ranges)
+    result = add_ai_dynamics_summary(
+        stats, ranges_payload, d_from, d_to,
+        request.args.get("type", "all"),
+        enabled=_settings.get("ai_enabled", True),
+    )
+
+    if not result["ok"]:
+        error_responses = {
+            "disabled": (503, "ИИ-оценка динамики недоступна (отключена в настройках или не настроена на сервере)."),
+            "throttled": (429, "Слишком частые запросы к ИИ. Подождите немного и повторите."),
+            "gigachat_failed": (502, "Не удалось получить оценку динамики от ИИ. Попробуйте позже."),
+        }
+        status_code, message = error_responses.get(result.get("error"), (502, "Не удалось получить оценку динамики от ИИ. Попробуйте позже."))
+        return jsonify(error=message), status_code
+
+    audit(
+        "ai_dynamics_summary",
+        "history",
+        None,
+        {
+            "date_from": d_from,
+            "date_to": d_to,
+            "type": request.args.get("type", "all"),
+            "cache": "hit" if result["cached"] else "miss",
+        },
+    )
+
+    return jsonify(
+        summary=result["summary"],
+        observations=result["observations"],
+        caution=result["caution"],
+        stats=stats,
+        date_from=d_from,
+        date_to=d_to,
+        cached=result["cached"],
+    )
 
 
 @app.get("/export.pdf")
