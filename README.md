@@ -90,16 +90,24 @@ sudo -i
 curl -fsSL https://raw.githubusercontent.com/ceshbox-code/medical_diary/main/install_synology.sh | sh
 ```
 
-Скрипт задаст три вопроса:
+Скрипт задаст несколько вопросов:
 
 | Вопрос | Что указать | По умолчанию |
-| --- | --- | --- |
+| :--- | :--- | :--- |
 | 📁 Папка установки | путь вида `/volume1/docker/...` | `/volume1/docker/medical_diary` |
 | 🔌 Внешний порт приложения | порт на NAS (в контейнере всегда `8000`) | `8000` |
-| 🌐 Домен для доступа и WebAuthn | только имя хоста, например `diary.example.ru`, без `https://` и пути. Пусто — если домена нет | пусто (без домена) |
+| 🐳 Имя Docker-контейнера | уникальное имя контейнера | `medical-diary-app` |
+| 🕐 Часовой пояс контейнера | формат IANA, например `Europe/Moscow` | `Europe/Moscow` |
+| 🌐 Доменное имя для доступа и WebAuthn | только имя хоста, например `diary.example.ru`, без `https://` и пути. Пусто — если домена нет | пусто (без домена) |
+| 🔒 HTTPS reverse proxy | будет ли домен опубликован через HTTPS-реверс-прокси в DSM | `Y` (да) |
+| 🤖 ИИ-ассистент GigaChat | включить опциональную интеграцию с GigaChat | `N` (нет) |
+| 🔑 GIGACHAT_AUTH_KEY | ключ авторизации GigaChat (можно заполнить позже в `.env`) | пусто |
 
 > [!NOTE]
-> Если вы указали домен, скрипт спросит, будет ли он опубликован через HTTPS-реверс-прокси в DSM. Отвечайте «да»: `SESSION_COOKIE_SECURE` и WebAuthn требуют именно такую схему.
+> Если вы указали домен, скрипт спросит, будет ли он опубликован через HTTPS reverse proxy в DSM. Отвечайте «да»: **`SESSION_COOKIE_SECURE` и WebAuthn требуют именно такую схему**.
+
+> [!IMPORTANT]
+> Ключ `GIGACHAT_AUTH_KEY` можно оставить пустым при установке и заполнить позже в файле `.env`. Подробнее о настройке GigaChat — в разделе [🤖 Настройка ИИ: GigaChat](#-настройка-ии-гигачат-бесплатный-доступ).
 
 Что делает скрипт автоматически:
 
@@ -478,4 +486,3 @@ docker exec medical-diary python3 scripts/backup.py
 <div align="center">
   <img src="docs/badges/footer.svg" alt="footer" width="100%" />
 </div>
-

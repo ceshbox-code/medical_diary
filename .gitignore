@@ -4,4 +4,3 @@
    __pycache__/
    *.pycdeploy.sh
 deploy.conf
-deploy.sh
