@@ -436,4 +436,4 @@ printf ' Контейнер:     %s\n' "$CONTAINER_NAME"
 printf ' Каталог:       %s\n' "$INSTALL_DIR"
 printf ' База данных:   %s/data/medical_diary.db\n' "$INSTALL_DIR"
 printf ' Бэкапы:        %s/backups/\n' "$INSTALL_DIR"
-printf '---------------------------------------------\n'
+printf -- '---------------------------------------------\n'
