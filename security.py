@@ -14,6 +14,7 @@ import json
 import os
 import secrets
 import sqlite3
+import time
 from datetime import datetime, timedelta
 from functools import wraps
 
@@ -125,6 +126,57 @@ def wants_json_response():
     return request.path.startswith("/api/") or request.path == "/export.pdf"
 
 
+# --- Блокировка по неактивности для аккаунтов с включённым Face ID ---------
+# Если у пользователя есть хотя бы один зарегистрированный passkey
+# (настройка «Вход по Face ID»), сессия считается «разблокированной» только
+# пока пользователь активен. После BIOMETRIC_LOCK_MINUTES без запросов
+# сессия сбрасывается, и приложение открывает /login, где автоматически
+# запускается Face ID (пароль остаётся запасным вариантом).
+# 0 (или отрицательное значение) полностью отключает блокировку.
+def _read_lock_minutes():
+    try:
+        return int(os.getenv("BIOMETRIC_LOCK_MINUTES", "5"))
+    except ValueError:
+        return 5
+
+
+BIOMETRIC_LOCK_MINUTES = _read_lock_minutes()
+
+
+def mark_session_active():
+    """Фиксирует момент последней активности в сессии (unix-время, сервер)."""
+    session["last_activity"] = int(time.time())
+
+
+def biometric_lock_expired(user_id):
+    """True, если у пользователя включён Face ID и сессия простаивала дольше
+    допустимого. Отсутствие/некорректное значение last_activity (например,
+    сессия создана до появления этой проверки) трактуется как «просрочено» —
+    безопасный вариант: один раз потребуется повторный вход."""
+    if BIOMETRIC_LOCK_MINUTES <= 0:
+        return False
+    db = get_db()
+    has_key = db.execute(
+        "SELECT 1 FROM webauthn_credentials WHERE user_id = ? LIMIT 1", (user_id,)
+    ).fetchone()
+    if not has_key:
+        return False
+    try:
+        idle = time.time() - int(session.get("last_activity"))
+    except (TypeError, ValueError):
+        return True
+    # idle < 0 (часы сервера откатились) тоже считаем просроченным.
+    return idle < 0 or idle > BIOMETRIC_LOCK_MINUTES * 60
+
+
+def _lock_session_response(user_id):
+    audit("biometric_lock", "user", user_id, {"idle_limit_min": BIOMETRIC_LOCK_MINUTES})
+    session.clear()
+    if wants_json_response():
+        return jsonify(error="Требуется повторный вход", code="locked"), 401
+    return redirect(url_for("login"))
+
+
 def login_required(f):
     @wraps(f)
     def wrapper(*args, **kwargs):
@@ -144,6 +196,10 @@ def login_required(f):
                 return jsonify(error="Учётная запись недоступна"), 401
             return redirect(url_for("login"))
 
+        if biometric_lock_expired(session["user_id"]):
+            return _lock_session_response(session["user_id"])
+        mark_session_active()
+
         return f(*args, **kwargs)
 
     return wrapper
@@ -161,6 +217,9 @@ def admin_required(f):
         if not row or row["status"] != "active":
             session.clear()
             return jsonify(error="Учётная запись недоступна"), 401
+        if biometric_lock_expired(session["user_id"]):
+            return _lock_session_response(session["user_id"])
+        mark_session_active()
         return f(*args, **kwargs)
 
     return wrapper
@@ -183,6 +242,10 @@ def security_headers(response):
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "same-origin"
+    # HTML-страницы (дашборд, вход) не должны браться из HTTP-кэша браузера:
+    # иначе блокировка по неактивности обходилась бы показом сохранённой копии.
+    if response.mimetype == "text/html":
+        response.headers["Cache-Control"] = "no-store"
     if current_app.config.get("SESSION_COOKIE_SECURE"):
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     response.headers["Content-Security-Policy"] = (

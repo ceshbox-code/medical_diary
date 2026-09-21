@@ -61,6 +61,7 @@ from security import (
     wants_json_response,
     login_required,
     admin_required,
+    mark_session_active,
     csrf_protect,
     security_headers,
 )
@@ -262,6 +263,7 @@ def login():
             session["is_admin"] = 1 if user["is_admin"] else 0
             session["csrf_token"] = secrets.token_hex(32)
             session.permanent = True
+            mark_session_active()
             audit("login_success", "user", user["id"], {"username": username})
             return redirect(url_for("dashboard"))
 
@@ -1572,6 +1574,7 @@ def wa_login():
     session["display_name"] = user["display_name"] or user["username"]
     session["is_admin"] = 1 if user["is_admin"] else 0
     session["csrf_token"] = secrets.token_hex(32)
+    mark_session_active()
     audit("login_webauthn", "user", user["id"], {"username": user["username"]})
     return jsonify(ok=True)
 
