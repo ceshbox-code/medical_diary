@@ -26,7 +26,7 @@ def _ai_ranges_payload(ranges):
         "systolic_mmhg": list(ranges.get("systolic", DEFAULT_RANGES["systolic"])),
         "diastolic_mmhg": list(ranges.get("diastolic", DEFAULT_RANGES["diastolic"])),
         "pulse_bpm": list(ranges.get("pulse", DEFAULT_RANGES["pulse"])),
-        "temperature_c": [35.0, 37.0],
+        "temperature_c": list(ranges.get("temperature", DEFAULT_RANGES["temperature"])),
     }
 
 

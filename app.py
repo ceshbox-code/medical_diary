@@ -164,6 +164,15 @@ app.after_request(security_headers)
 
 DEFAULT_SETTINGS = {"glucose": True, "vitals": True, "food": True, "temperature": True, "weight": True, "ranges_default": True, "ai_enabled": True}
 
+# Допустимые абсолютные границы персональных диапазонов по ключам. Для ключей
+# без явной записи действует прежний общий предел 0–1000.
+RANGE_ABS_LIMITS = {"temperature": (30.0, 45.0)}
+RANGE_ABS_LIMIT_DEFAULT = (0.0, 1000.0)
+
+
+def _range_limits(key):
+    return RANGE_ABS_LIMITS.get(key, RANGE_ABS_LIMIT_DEFAULT)
+
 
 def get_user_settings(user_id):
     """Настройки пользователя (видимость блоков + персональные диапазоны),
@@ -193,7 +202,8 @@ def get_user_settings(user_id):
                         low, high = float(bounds[0]), float(bounds[1])
                     except (TypeError, ValueError):
                         continue
-                    if 0 <= low < high <= 1000:
+                    lim_lo, lim_hi = _range_limits(key)
+                    if lim_lo <= low < high <= lim_hi:
                         ranges[key] = (low, high)
         except Exception:
             pass
@@ -1342,8 +1352,9 @@ def api_set_settings():
                 low, high = float(bounds[0]), float(bounds[1])
             except (TypeError, ValueError):
                 return jsonify(error=f"Диапазон «{key}»: значения должны быть числами"), 400
-            if not (0 <= low < high <= 1000):
-                return jsonify(error=f"Диапазон «{key}»: минимум должен быть меньше максимума (0–1000)"), 400
+            lim_lo, lim_hi = _range_limits(key)
+            if not (lim_lo <= low < high <= lim_hi):
+                return jsonify(error=f"Диапазон «{key}»: минимум должен быть меньше максимума ({lim_lo:g}–{lim_hi:g})"), 400
             current_ranges[key] = [low, high]
 
     current["ranges"] = current_ranges

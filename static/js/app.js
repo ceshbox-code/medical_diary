@@ -370,6 +370,16 @@ function loadLastEntryStatuses() {
 loadLastEntryStatuses();
 
 var RANGE_KEYS = ['glucose_fasting', 'glucose_post', 'systolic', 'diastolic', 'pulse'];
+// Температура тела: строка показывается и сохраняется только если сервер
+// действительно отдал для неё значение по умолчанию (DEFAULT_RANGES_JS).
+// Так фронтенд остаётся совместимым со старым validators.py и не ломает
+// сохранение остальных диапазонов пустым полем.
+(function() {
+  var hasTemp = !!(typeof DEFAULT_RANGES_JS !== 'undefined' && DEFAULT_RANGES_JS && DEFAULT_RANGES_JS.temperature);
+  if (hasTemp) { RANGE_KEYS.push('temperature'); return; }
+  var row = document.getElementById('range-row-temperature');
+  if (row) { row.style.display = 'none'; }
+})();
 
 function setRangeInputsDisabled(disabled) {
   RANGE_KEYS.forEach(function(k) {
@@ -909,11 +919,13 @@ function updateDateLabels() {
           { points: diaPoints, shape: 'square' }
         ], vBands);
       }
-      var tempPoints = entries.filter(function(e) { return e.type === 'temperature'; }).map(function(e) { return { x: toTimestamp(e.measured_at), y: e.temperature_c, status: 'ok' }; }).sort(function(a,b){ return a.x-b.x; });
+      var tempPoints = entries.filter(function(e) { return e.type === 'temperature'; }).map(function(e) { return { x: toTimestamp(e.measured_at), y: e.temperature_c, status: e.assessment_status || 'ok' }; }).sort(function(a,b){ return a.x-b.x; });
       var tWrap = document.getElementById('trend-temperature-wrap');
       var hasTemperature = tempPoints.length >= 2;
       if (tWrap) { tWrap.hidden = !hasTemperature; }
-      if (hasTemperature) { drawLineChart(document.getElementById('trend-temperature'), [{ points: tempPoints, shape: 'circle' }], []); }
+      var tBands = [];
+      if (RANGES.temperature) { tBands.push({ low: RANGES.temperature[0], high: RANGES.temperature[1], color: BAND_COLOR_INNER }); }
+      if (hasTemperature) { drawLineChart(document.getElementById('trend-temperature'), [{ points: tempPoints, shape: 'circle' }], tBands); }
 
       var weightPoints = entries.filter(function(e) { return e.type === 'weight'; }).map(function(e) { return { x: toTimestamp(e.measured_at), y: e.weight_kg, status: 'ok' }; }).sort(function(a,b){ return a.x-b.x; });
       var wWrap = document.getElementById('trend-weight-wrap');
@@ -1002,6 +1014,10 @@ function updateDateLabels() {
           var val=document.createElement('div'); val.className='history-value';
           var num=document.createElement('span'); num.className='number'; num.textContent=Number(entry.temperature_c).toFixed(1); val.appendChild(num);
           var unit=document.createElement('span'); unit.className='unit'; unit.textContent='°C'; val.appendChild(unit); card.appendChild(val);
+          var tSt = entry.assessment_status;
+          if (tSt === 'high' || tSt === 'low' || tSt === 'ok') {
+            card.appendChild(statusBadge(tSt, tSt === 'high' ? '▲ Выше диапазона' : tSt === 'low' ? '▼ Ниже диапазона' : '✓ В пределах диапазона'));
+          }
           appendComment(card, entry.comment); return card;
         }
 

@@ -22,7 +22,15 @@ from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, 
 from reportlab.lib.styles import ParagraphStyle
 
 from db import get_db
-from validators import DEFAULT_RANGES, UNIT_RU, unit_ru, parse_iso_date, format_dt_ru, status_of
+from validators import (
+    DEFAULT_RANGES,
+    TEMPERATURE_HIGH_ALERT_C,
+    UNIT_RU,
+    unit_ru,
+    parse_iso_date,
+    format_dt_ru,
+    status_of,
+)
 from assessments import _normalize_ai_text
 
 
@@ -241,8 +249,14 @@ def query_entries(user_id, date_from=None, date_to=None, entry_type="all", sort=
             (user_id, d_from, d_to),
         ).fetchall()
 
+        temp_low, temp_high = ranges.get("temperature", DEFAULT_RANGES["temperature"])
+
         for r in rows:
             val = float(r["temperature_c"])
+            # Тот же порядок проверок, что и в assessments.temperature_assessment:
+            # от 38.0 °C всегда «выше», иначе — по персональному диапазону.
+            st = "high" if val >= TEMPERATURE_HIGH_ALERT_C else status_of(val, temp_low, temp_high)
+            icon = STATUS_ICON[st]
             entries.append(
                 {
                     "id": r["id"],
@@ -251,11 +265,12 @@ def query_entries(user_id, date_from=None, date_to=None, entry_type="all", sort=
                     "measured_at": r["measured_at"],
                     "measured_at_ru": format_dt_ru(r["measured_at"]),
                     "display": f"{val:.1f} °C",
-                    "display_html": f"{val:.1f} °C",
-                    "display_pdf": f"{val:.1f} °C",
+                    "display_html": f'<span class="st-{st}">{val:.1f}{icon}</span> °C',
+                    "display_pdf": f'<font backcolor="{STATUS_COLORS[st]}">{val:.1f}{icon}</font> °C',
                     "comment": r["comment"] or "",
                     "sort_value": val,
                     "temperature_c": val,
+                    "status": st,
                 }
             )
 

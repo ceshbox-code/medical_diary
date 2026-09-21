@@ -25,7 +25,7 @@ import uuid
 from flask import session
 
 from db import get_db
-from validators import DEFAULT_RANGES, status_of
+from validators import DEFAULT_RANGES, TEMPERATURE_HIGH_ALERT_C, status_of
 from ai_utils import (
     _ai_ranges_payload,
     _ai_input_hash,
@@ -126,30 +126,42 @@ def vitals_assessment(systolic, diastolic, pulse, ranges=None):
     return assessment, recommendation, overall
 
 
-def temperature_assessment(value_c):
-    """Справочная оценка температуры без постановки диагноза."""
+def temperature_assessment(value_c, ranges=None):
+    """Справочная оценка температуры без постановки диагноза.
+
+    Границы «ориентировочного диапазона» берутся из персональных настроек
+    (ranges["temperature"]); по умолчанию 35.0–37.0 °C, как и раньше.
+    Порог 38.0 °C от настроек не зависит.
+    """
+    ranges = ranges or DEFAULT_RANGES
+    try:
+        low, high = ranges.get("temperature", DEFAULT_RANGES["temperature"])
+        low, high = float(low), float(high)
+    except (TypeError, ValueError):
+        low, high = DEFAULT_RANGES["temperature"]
+
     try:
         value = float(value_c)
     except (TypeError, ValueError):
         return "Значение температуры не распознано", "Проверьте измерение и единицы (°C).", "ok"
 
-    if value < 35.0:
+    if value >= TEMPERATURE_HIGH_ALERT_C:
+        return (
+            "Температура высокая",
+            "Повторите измерение и оцените самочувствие; при сохранении высокой температуры или ухудшении состояния обратитесь за медицинской помощью.",
+            "high",
+        )
+    if value < low:
         return (
             "Температура ниже ориентировочного диапазона",
             "Повторите измерение и оцените самочувствие; при выраженной слабости или ухудшении состояния обратитесь за медицинской помощью.",
             "low",
         )
-    if value <= 37.0:
+    if value <= high:
         return "Температура в пределах ориентировочного диапазона", "Продолжайте наблюдение с учётом самочувствия.", "ok"
-    if value < 38.0:
-        return (
-            "Температура повышена относительно ориентировочного диапазона",
-            "Повторите измерение через некоторое время и наблюдайте за самочувствием; при сохранении повышения обратитесь к врачу.",
-            "high",
-        )
     return (
-        "Температура высокая",
-        "Повторите измерение и оцените самочувствие; при сохранении высокой температуры или ухудшении состояния обратитесь за медицинской помощью.",
+        "Температура повышена относительно ориентировочного диапазона",
+        "Повторите измерение через некоторое время и наблюдайте за самочувствием; при сохранении повышения обратитесь к врачу.",
         "high",
     )
 
@@ -821,7 +833,7 @@ def add_assessments(entries, ranges=None):
                     ranges,
                 )
             elif e.get("type") == "temperature":
-                assessment, recommendation, status = temperature_assessment(e.get("temperature_c"))
+                assessment, recommendation, status = temperature_assessment(e.get("temperature_c"), ranges)
             elif e.get("type") == "food":
                 assessment, recommendation, status = food_assessment()
             elif e.get("type") == "weight":
