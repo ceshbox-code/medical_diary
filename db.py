@@ -204,6 +204,123 @@ CREATE TABLE IF NOT EXISTS webauthn_credentials (
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   last_used_at TEXT
 );
+
+-- Лекарства пользователя. Название, дозу и инструкцию вводит сам
+-- пользователь; сервис их не проверяет и не даёт рекомендаций.
+-- days_mask: бит 0 = понедельник ... бит 6 = воскресенье (127 = каждый день).
+CREATE TABLE IF NOT EXISTS medications (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  dose_value REAL CHECK (dose_value IS NULL OR dose_value > 0),
+  dose_unit TEXT,
+  instructions TEXT,
+  start_date TEXT NOT NULL,
+  end_date TEXT,
+  is_active INTEGER NOT NULL DEFAULT 1,
+  comment TEXT,
+  days_mask INTEGER NOT NULL DEFAULT 127 CHECK (days_mask BETWEEN 1 AND 127),
+  source TEXT NOT NULL DEFAULT 'manual',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  deleted_at TEXT,
+  CHECK ((dose_value IS NULL) = (dose_unit IS NULL)),
+  CHECK (end_date IS NULL OR end_date >= start_date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_medications_user ON medications(user_id, deleted_at);
+
+-- Времена суток приёма (HH:MM). Одна строка на каждое время.
+CREATE TABLE IF NOT EXISTS medication_schedule (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  medication_id INTEGER NOT NULL REFERENCES medications(id) ON DELETE CASCADE,
+  time_of_day TEXT NOT NULL,
+  UNIQUE (medication_id, time_of_day)
+);
+
+-- ЖУРНАЛ ФАКТОВ приёма: только то, что пользователь отметил сам.
+-- Название и доза сохраняются снимком на момент отметки, поэтому
+-- последующее редактирование лекарства историю не меняет.
+-- scheduled_at = NULL — приём вне графика (только status = 'taken').
+-- «Не принял» автоматически не записывается: это расчётное состояние в API.
+CREATE TABLE IF NOT EXISTS medication_intakes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  medication_id INTEGER NOT NULL REFERENCES medications(id) ON DELETE CASCADE,
+  medication_name TEXT NOT NULL,
+  dose_value REAL,
+  dose_unit TEXT,
+  scheduled_at TEXT,
+  status TEXT NOT NULL CHECK (status IN ('taken', 'skipped')),
+  taken_at TEXT,
+  comment TEXT,
+  source TEXT NOT NULL DEFAULT 'manual',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  deleted_at TEXT,
+  CHECK ((status = 'taken' AND taken_at IS NOT NULL) OR (status = 'skipped' AND taken_at IS NULL)),
+  CHECK (status = 'taken' OR scheduled_at IS NOT NULL)
+);
+
+-- Один плановый приём — одна активная отметка (идемпотентность повторов).
+CREATE UNIQUE INDEX IF NOT EXISTS ux_intake_slot
+  ON medication_intakes(medication_id, scheduled_at)
+  WHERE scheduled_at IS NOT NULL AND deleted_at IS NULL;
+
+CREATE INDEX IF NOT EXISTS idx_intakes_user_time ON medication_intakes(user_id, scheduled_at);
+
+-- Напоминания об измерениях (не о лекарствах — те строятся из графика).
+CREATE TABLE IF NOT EXISTS reminders (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL CHECK (kind IN ('glucose', 'vitals', 'weight', 'temperature', 'food', 'custom')),
+  title TEXT NOT NULL,
+  time_of_day TEXT NOT NULL,
+  days_mask INTEGER NOT NULL DEFAULT 127 CHECK (days_mask BETWEEN 1 AND 127),
+  is_active INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  deleted_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_reminders_user ON reminders(user_id, deleted_at);
+
+-- Подписки устройств на Web Push. endpoint — секретный адрес push-сервиса
+-- (в журнал аудита не пишется). Одна строка на устройство/браузер.
+CREATE TABLE IF NOT EXISTS push_subscriptions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  endpoint TEXT NOT NULL UNIQUE,
+  p256dh TEXT NOT NULL,
+  auth TEXT NOT NULL,
+  user_agent TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  last_success_at TEXT,
+  failure_count INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_push_subs_user ON push_subscriptions(user_id);
+
+-- Журнал отправленных уведомлений: одна строка на событие (лекарство или
+-- напоминание + плановое время + фаза). UNIQUE не даёт отправить одно и то же
+-- событие дважды, в том числе при повторных проходах планировщика.
+-- status: claimed (взято в работу), sent, retry (временный сбой, будет повтор),
+-- failed, suppressed (уже отмечено/записано — уведомление не нужно).
+CREATE TABLE IF NOT EXISTS notification_deliveries (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL CHECK (kind IN ('medication', 'reminder')),
+  ref_id INTEGER NOT NULL,
+  due_at TEXT NOT NULL,
+  phase TEXT NOT NULL CHECK (phase IN ('first', 'repeat')),
+  status TEXT NOT NULL CHECK (status IN ('claimed', 'sent', 'retry', 'failed', 'suppressed')),
+  attempts INTEGER NOT NULL DEFAULT 1,
+  sent_count INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (kind, ref_id, due_at, phase)
+);
 """
 
 

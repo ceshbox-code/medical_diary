@@ -20,6 +20,8 @@ services:
       - ./ai_utils.py:/app/ai_utils.py:ro
       - ./db.py:/app/db.py:ro
       - ./security.py:/app/security.py:ro
+      - ./reminders.py:/app/reminders.py:ro
+      - ./push.py:/app/push.py:ro
 
       - ./assessments.py:/app/assessments.py:ro
       - ./pdf_export.py:/app/pdf_export.py:ro

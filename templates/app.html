@@ -9,7 +9,7 @@
 <title>Медицинский дневник</title>
 <link rel="apple-touch-icon" sizes="180x180" href="/apple-icon-180x180.png">
 <link rel="manifest" href="/manifest.json">
-<link rel="stylesheet" href="/css/app.css">
+<link rel="stylesheet" href="/css/app.css?v=2">
 </head>
 <body>
 <div id="toast"><div class="toast-bubble" id="toast-bubble"></div></div>
@@ -66,6 +66,18 @@
   <div class="card flat"><div class="legend">● Натощак · ■ После еды · зелёный — целевой диапазон · красный — вне диапазона. Подсветка справочная и не является диагнозом.</div><div class="trend-chart-wrap" id="trend-glucose-wrap" hidden><div class="trend-chart-title">🩸 Глюкоза, ммоль/л</div><canvas id="trend-glucose"></canvas><p class="chart-legend">● натощак · ■ после еды · зелёным — целевой диапазон</p></div><div class="trend-chart-wrap" id="trend-vitals-wrap" hidden><div class="trend-chart-title">♥ Давление, мм рт. ст.</div><canvas id="trend-vitals"></canvas><p class="chart-legend">● систолическое · ■ диастолическое · зелёным — целевой диапазон</p></div><div class="trend-chart-wrap" id="trend-temperature-wrap" hidden><div class="trend-chart-title">🌡️ Температура, °C</div><canvas id="trend-temperature"></canvas><p class="chart-legend">● температура · зелёным — справочный диапазон</p></div><div class="trend-chart-wrap" id="trend-weight-wrap" hidden><div class="trend-chart-title">⚖️ Вес, кг</div><canvas id="trend-weight"></canvas><p class="chart-legend">● вес</p></div><div class="message" id="history-msg"></div><div id="history-cards" class="history-cards" aria-live="polite"></div></div>
   <div class="card" id="edit-card" hidden><div class="edit-title" id="edit-title">✏️ Редактирование</div><div id="edit-glucose" hidden><label>Тип измерения</label><select id="edit_glucose_type"><option value="fasting">🌅 Натощак</option><option value="post_meal">🍽️ После еды</option></select><label>Значение, ммоль/л</label><input id="edit_glucose_value" class="decimal-input" type="text" inputmode="decimal"></div><div id="edit-vitals" hidden><div class="row"><div><label>Систолическое</label><input id="edit_systolic" type="number" min="30" max="400" inputmode="numeric"></div><div><label>Диастолическое</label><input id="edit_diastolic" type="number" min="10" max="300" inputmode="numeric"></div></div><label>Пульс</label><input id="edit_pulse" type="number" min="20" max="300" inputmode="numeric"></div><div id="edit-temperature" hidden><label>Температура, °C</label><input id="edit_temperature_value" class="decimal-input" type="text" inputmode="decimal"></div><div id="edit-weight" hidden><label>Вес, кг</label><input id="edit_weight_value" class="decimal-input" type="text" inputmode="decimal"></div><div id="edit-food" hidden><label>Продукт</label><input id="edit_food_name" maxlength="150"><div class="row"><div><label>Количество</label><input id="edit_amount_value" class="decimal-input" type="text" inputmode="decimal"></div><div><label>Единица</label><select id="edit_amount_unit"><option value="г">г</option><option value="мл">мл</option><option value="шт">шт</option><option value="порция">порция</option></select></div></div></div><label>Дата и время</label><input id="edit_measured_at" type="datetime-local"><label>Комментарий</label><textarea id="edit_comment" maxlength="1000"></textarea><button type="button" class="primary-action" onclick="saveEdit()">Сохранить изменения</button><button type="button" class="quick-repeat" onclick="closeEdit()">Отмена</button><div class="message" id="edit-msg"></div></div>
 </section>
+    <section id="page-meds" class="tab-page" hidden>
+      <div class="page-intro"><h1>Лекарства</h1><p id="meds-date-label">Сегодня</p></div>
+      <div class="message" id="meds-status"></div>
+      <div class="section-label"><strong>График на сегодня</strong></div>
+      <div id="meds-today" class="meds-list"><div class="muted">Загрузка…</div></div>
+      <p class="field-hint meds-legend">«Не отмечено» — расчёт по расписанию: время приёма прошло, а отметки нет. Это не означает, что лекарство не принято. Отмеченные приёмы уходят в историю приёмов ниже.</p>
+      <div class="section-label"><strong>Мои лекарства</strong><button type="button" class="link-btn" id="med-add-btn">+ Добавить</button></div>
+      <div id="meds-list" class="meds-list"></div>
+      <p class="field-hint meds-legend">Напоминания об измерениях и уведомления — в «Ещё → Уведомления».</p>
+      <div class="card flat meds-history-card"><details id="meds-history-details"><summary>📋 История приёмов (30 дней)</summary><div id="meds-history" class="meds-list"></div></details></div>
+      <p class="field-hint meds-legend">Приложение только хранит введённые вами данные и не даёт рекомендаций по лекарствам и дозам. Вопросы о лечении — к врачу.</p>
+    </section>
     <section id="page-settings" class="tab-page" hidden>
       <div class="page-intro"><div><h1>Ещё</h1><p>Настройки, помощь и управление данными.</p></div></div>
       <div class="card"><details><summary>ℹ️ О программе и помощь</summary><div class="about-note">
@@ -79,6 +91,18 @@
       <div class="card"><details><summary>⚙️ Настройки</summary>
         <div class="settings-section"><div class="settings-title">Оформление</div><label class="switch-row"><span>🌙 Тёмная тема</span><input type="checkbox" id="theme-toggle" onchange="onThemeToggleChange(this)"><span class="switch"></span></label></div>
         <div class="settings-section"><div class="settings-title">🤖 ИИ-оценка</div><label class="switch-row"><span>Использовать ИИ в оценках (PDF и динамика)</span><input type="checkbox" id="set-ai-enabled" checked><span class="switch"></span></label><p class="muted" id="ai-status">Проверка доступности…</p><button type="button" class="quick-repeat" onclick="testAi()">🔎 Проверить работу ИИ</button><div class="message" id="ai-msg"></div></div>
+        <div class="settings-section"><div class="settings-title">🔔 Уведомления</div>
+          <p class="med-sub" id="push-status">Проверяем…</p>
+          <div class="med-actions push-actions">
+            <button type="button" class="med-btn primary" id="push-toggle" hidden>Включить уведомления</button>
+            <button type="button" class="med-btn" id="push-test" hidden>Тест</button>
+          </div>
+          <p class="field-hint" id="push-hint">В уведомлениях нет названий лекарств и значений измерений. Время — по часам сервера.</p>
+          <div class="section-label notif-sub"><strong>Напоминания об измерениях</strong><button type="button" class="link-btn" id="rem-add-btn">+ Добавить</button></div>
+          <div id="rem-list" class="meds-list"></div>
+          <p class="field-hint">График приёма лекарств и сами лекарства — во вкладке «Лекарства».</p>
+          <div class="message" id="notif-status"></div>
+        </div>
         <div class="settings-section"><div class="settings-title">Блоки на главной странице</div><label class="switch-row"><span>🩸 Глюкоза</span><input type="checkbox" id="set-glucose" checked><span class="switch"></span></label><label class="switch-row"><span>💓 Давление и пульс</span><input type="checkbox" id="set-vitals" checked><span class="switch"></span></label><label class="switch-row"><span>🌡️ Температура</span><input type="checkbox" id="set-temperature" checked><span class="switch"></span></label><label class="switch-row"><span>⚖️ Вес</span><input type="checkbox" id="set-weight" checked><span class="switch"></span></label><label class="switch-row"><span>🥗 Питание</span><input type="checkbox" id="set-food" checked><span class="switch"></span></label><div class="message" id="settings-msg"></div></div>
         <div class="settings-section"><div class="settings-title" id="wa-summary">🔐 Биометрия</div><p class="muted" id="wa-hint">Быстрый вход по биометрии этого устройства, без пароля.</p><label class="switch-row"><span id="wa-toggle-label">Вход по биометрии</span><input type="checkbox" id="wa-toggle" onchange="onWaToggleChange(this)"><span class="switch"></span></label><p class="muted" id="wa-availability"></p><div class="message" id="wa-msg"></div></div>
         <div class="settings-section"><div class="settings-title">Персональные диапазоны нормы</div><p class="muted">Используются только для справочной подсветки. Если врач указал другие целевые значения, впишите их здесь.</p><label class="switch-row"><span>Использовать значения по умолчанию</span><input type="checkbox" id="ranges-default-toggle" onchange="onRangesDefaultToggleChange(this)"><span class="switch"></span></label><div id="range-inputs">
@@ -95,7 +119,7 @@
     </section>
 {% endif %}
 </main></div>
-{% if not is_admin %}<nav class="tab-bar" aria-label="Основная навигация"><button type="button" class="tab-btn" id="tab-btn-input" onclick="showPage('input')"><span class="tab-icon">📝</span><span>Ввод</span></button><button type="button" class="tab-btn" id="tab-btn-history" onclick="showPage('history')"><span class="tab-icon">▥</span><span>История</span></button><button type="button" class="tab-btn" id="tab-btn-settings" onclick="showPage('settings')"><span class="tab-icon">⚙️</span><span>Ещё</span></button></nav>{% endif %}
+{% if not is_admin %}<nav class="tab-bar" aria-label="Основная навигация"><button type="button" class="tab-btn" id="tab-btn-input" onclick="showPage('input')"><span class="tab-icon">📝</span><span>Ввод</span></button><button type="button" class="tab-btn" id="tab-btn-history" onclick="showPage('history')"><span class="tab-icon">▥</span><span>История</span></button><button type="button" class="tab-btn" id="tab-btn-meds" onclick="showPage('meds')"><span class="tab-icon">💊</span><span>Лекарства</span></button><button type="button" class="tab-btn" id="tab-btn-settings" onclick="showPage('settings')"><span class="tab-icon">⚙️</span><span>Ещё</span></button></nav>{% endif %}
 {% if not is_admin %}
 <div id="entry-modal" class="modal" hidden><div class="modal-panel"><div class="modal-grabber"></div><div class="modal-head"><div id="modal-icon" class="quick-icon glucose">💧</div><div class="modal-title"><h2 id="modal-title">Глюкоза</h2><p id="modal-subtitle">Ввод показателя</p></div><button type="button" id="modal-close-core" class="close-btn" onclick="closeEntry()">×</button></div>
 <form id="glucose-form" hidden><div class="metric-hero"><label>Значение, ммоль/л</label><div class="metric-input"><input name="value" class="decimal-input" type="text" inputmode="decimal" pattern="[0-9]+([.,][0-9]+)?" required><span class="metric-unit">ммоль/л</span></div><div class="metric-status"><p class="field-hint" id="hint-glucose"></p></div></div><label>Контекст измерения</label><div class="segmented"><input type="radio" id="gt_fasting" name="glucose_type" value="fasting" checked><label for="gt_fasting">🌅 Натощак</label><input type="radio" id="gt_postmeal" name="glucose_type" value="post_meal"><label for="gt_postmeal">🍽️ После еды</label></div><label>Дата и время</label><input name="measured_at" type="datetime-local" class="dt"><label>Комментарий <span class="muted">(необязательно)</span></label><textarea name="comment" maxlength="1000" placeholder="Например: хорошее самочувствие"></textarea><p class="last-entry-status muted" id="last-status-glucose"></p><button type="submit" class="primary-action">Сохранить измерение</button><div class="message" id="glucose-msg"></div></form>
@@ -106,6 +130,40 @@
 </div></div>
 {% endif %}
 {% if not is_admin %}
+<div id="med-modal" class="modal" hidden><div class="modal-panel"><div class="modal-grabber"></div>
+<div class="modal-head"><div class="quick-icon food">💊</div><div class="modal-title"><h2 id="med-modal-title">Лекарство</h2><p>Название и дозу вводите по назначению врача</p></div><button type="button" class="close-btn" data-close="med-modal" aria-label="Закрыть">×</button></div>
+<form id="med-form" autocomplete="off" novalidate>
+<label for="med-name">Название</label><input id="med-name" maxlength="100">
+<div class="row"><div><label for="med-dose">Доза</label><input id="med-dose" type="text" inputmode="decimal" placeholder="Например: 500"></div><div><label for="med-unit">Единица</label><select id="med-unit"></select></div></div>
+<label for="med-instr">Как принимать <span class="muted">(необязательно)</span></label><input id="med-instr" maxlength="200" placeholder="Например: после еды">
+<label>Время приёма</label><div id="med-times" class="times-list"></div><button type="button" class="link-btn" id="med-time-add">+ Добавить время</button>
+<label>Дни недели</label><div id="med-days" class="chips"></div>
+<div class="row"><div><label for="med-start">Начало</label><input id="med-start" type="date"></div><div><label for="med-end">Окончание</label><input id="med-end" type="date"></div></div>
+<label for="med-comment">Комментарий <span class="muted">(необязательно)</span></label><textarea id="med-comment" maxlength="500"></textarea>
+<label class="switch-row"><span>Принимаю сейчас</span><input type="checkbox" id="med-active" checked><span class="switch"></span></label>
+<button type="submit" class="primary-action" id="med-save">Сохранить</button>
+<button type="button" class="link-btn danger-link" id="med-delete" hidden>Удалить лекарство</button>
+<div class="message" id="med-msg"></div></form></div></div>
+<div id="rem-modal" class="modal" hidden><div class="modal-panel"><div class="modal-grabber"></div>
+<div class="modal-head"><div class="quick-icon glucose">🔔</div><div class="modal-title"><h2 id="rem-modal-title">Напоминание</h2><p>Напоминание об измерении</p></div><button type="button" class="close-btn" data-close="rem-modal" aria-label="Закрыть">×</button></div>
+<form id="rem-form" autocomplete="off" novalidate>
+<label for="rem-kind">Что измерить</label><select id="rem-kind"></select>
+<label for="rem-title">Название <span class="muted">(необязательно, кроме «Своё»)</span></label><input id="rem-title" maxlength="100">
+<label for="rem-time">Время</label><input id="rem-time" type="time">
+<label>Дни недели</label><div id="rem-days" class="chips"></div>
+<label class="switch-row"><span>Включено</span><input type="checkbox" id="rem-active" checked><span class="switch"></span></label>
+<button type="submit" class="primary-action" id="rem-save">Сохранить</button>
+<button type="button" class="link-btn danger-link" id="rem-delete" hidden>Удалить напоминание</button>
+<div class="message" id="rem-msg"></div></form></div></div>
+<div id="intake-modal" class="modal" hidden><div class="modal-panel"><div class="modal-grabber"></div>
+<div class="modal-head"><div class="quick-icon food">✔</div><div class="modal-title"><h2 id="intake-title">Отметка приёма</h2><p id="intake-sub"></p></div><button type="button" class="close-btn" data-close="intake-modal" aria-label="Закрыть">×</button></div>
+<form id="intake-form" autocomplete="off" novalidate>
+<div class="segmented" id="intake-status-group"><input type="radio" id="ik_taken" name="ik_status" value="taken" checked><label for="ik_taken">✔ Принял</label><input type="radio" id="ik_skipped" name="ik_status" value="skipped"><label for="ik_skipped">⏭ Пропустил</label></div>
+<div id="intake-time-wrap"><label for="intake-time">Время приёма</label><input id="intake-time" type="time"><p class="field-hint">Если не указать, запишется текущее время.</p></div>
+<label for="intake-comment">Комментарий <span class="muted">(необязательно)</span></label><textarea id="intake-comment" maxlength="500"></textarea>
+<button type="submit" class="primary-action" id="intake-save">Сохранить</button>
+<button type="button" class="link-btn danger-link" id="intake-delete" hidden>Снять отметку</button>
+<div class="message" id="intake-msg"></div></form></div></div>
 <div id="pdf-overlay" hidden><div class="pdf-toolbar"><button type="button" class="pdf-btn" onclick="zoomPdf(-1)">➖</button><span id="zoom-label">100%</span><button type="button" class="pdf-btn" onclick="zoomPdf(1)">➕</button><span class="pdf-title">📄 Медицинский дневник</span><button type="button" class="pdf-btn" onclick="downloadPdf()">⬇️</button><button type="button" class="pdf-btn" onclick="sharePdf()">📤</button><button type="button" class="pdf-btn" onclick="closePdfViewer()">❌</button></div><div id="pdf-pages"></div></div>
 <div id="pdf-type-modal" class="modal" hidden><div class="modal-panel"><div class="modal-grabber"></div><div class="modal-head"><div class="modal-title"><h2>Записи для PDF</h2><p class="muted">Отметьте один или несколько типов</p></div><button type="button" class="close-btn" onclick="closePdfTypeModal()">×</button></div>
 <div class="pdf-type-list">
@@ -126,5 +184,5 @@ var USER_SETTINGS = {{ settings_json | safe }};
 var RANGES = {{ ranges_json | safe }};
 var DEFAULT_RANGES_JS = {{ default_ranges_json | safe }};
 </script>
-{% if is_admin %}<script src="/js/admin.js"></script>{% else %}<script src="/js/app.js"></script>{% endif %}
+{% if is_admin %}<script src="/js/admin.js"></script>{% else %}<script src="/js/app.js?v=2"></script><script src="/js/meds.js?v=3"></script>{% endif %}
 </body></html>

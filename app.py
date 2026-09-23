@@ -48,6 +48,8 @@ from ai_utils import (
     compute_period_stats,
 )
 from db import DATABASE, SCHEMA, get_db, close_db, init_db
+from reminders import reminders_bp
+from push import push_bp, start_push_scheduler
 from security import (
     audit,
     LOGIN_MAX_ATTEMPTS,
@@ -161,6 +163,8 @@ app.permanent_session_lifetime = timedelta(days=int(os.getenv("SESSION_LIFETIME_
 app.teardown_appcontext(close_db)
 app.before_request(csrf_protect)
 app.after_request(security_headers)
+app.register_blueprint(reminders_bp)
+app.register_blueprint(push_bp)
 
 
 DEFAULT_SETTINGS = {"glucose": True, "vitals": True, "food": True, "temperature": True, "weight": True, "ranges_default": True, "ai_enabled": True}
@@ -224,6 +228,11 @@ if BACKUP_ENABLED:
     threading.Thread(target=backup_scheduler_loop, daemon=True).start()
 else:
     print("[backup] Автобэкап отключён (BACKUP_ENABLED=false)", flush=True)
+
+# Планировщик уведомлений (Web Push). Приложение запускается одним воркером
+# gunicorn (--workers 1), поэтому поток запускается один раз; повторную
+# отправку всё равно исключает журнал notification_deliveries.
+start_push_scheduler(app)
 
 
 @app.get("/health")

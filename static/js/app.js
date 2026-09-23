@@ -271,7 +271,7 @@ function showToast(text, ok) {
   showToast._t = setTimeout(function() { bubble.className = 'toast-bubble'; }, 2200);
 }
 
-var TAB_PAGES = ['input', 'history', 'settings'];
+var TAB_PAGES = ['input', 'history', 'meds', 'settings'];
 function showPage(name) {
   TAB_PAGES.forEach(function(p) {
     var pageEl = document.getElementById('page-' + p);
@@ -281,6 +281,7 @@ function showPage(name) {
   });
   try { localStorage.setItem('medical_diary_active_tab', name); } catch (e) {}
   if (name === 'history') { loadHistory(); }
+  if ((name === 'meds' || name === 'settings') && window.MedsUI) { window.MedsUI.load(); }
 }
 (function() {
   var saved = 'input';

@@ -22,3 +22,41 @@ main{width:100%;padding:10px 16px 18px}.page-intro{margin:8px 2px 18px}.page-int
 #pdf-overlay{position:fixed;inset:0;z-index:100;background:#525659;display:flex;flex-direction:column;padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)}.pdf-toolbar{display:flex;align-items:center;gap:7px;background:#fff;padding:8px 10px}.pdf-title{flex:1;min-width:0;font-weight:700;font-size:16px}.pdf-btn{width:auto;min-height:42px;line-height:42px;margin:0;padding:0 10px;font-size:18px;border-radius:10px;background:#f0f2f5;color:#17202b}.pdf-pages{flex:1}.pdf-status{color:#fff;text-align:center;padding:24px;font-size:16px}#zoom-label{min-width:48px;text-align:center;font-weight:700;font-size:14px;color:#333}#pdf-pages{flex:1;overflow:auto;-webkit-overflow-scrolling:touch;padding:10px}#pdf-pages canvas{display:block;margin:0 auto 10px;background:#fff;border-radius:3px;box-shadow:0 1px 4px rgba(0,0,0,.4)}
 @media(min-width:520px) and (max-width:699px){.quick-list{grid-template-columns:repeat(2,minmax(0,1fr))}.quick-card{min-height:100px}}@media(min-width:700px){main{padding-left:20px;padding-right:20px}.quick-list{grid-template-columns:repeat(auto-fit,minmax(280px,1fr))}.quick-card{min-height:116px;grid-template-columns:64px minmax(0,1fr) 18px;align-content:center;padding:14px}.quick-copy{align-self:center}.quick-title{font-size:16px}.quick-sub{font-size:12px}.history-cards{grid-template-columns:1fr 1fr}.history-day-title{grid-column:1/-1}}
 @media(max-width:430px){.history-toolbar-row{grid-template-columns:1fr}.date-grid{grid-template-columns:1fr 1fr}.preset-row{grid-template-columns:repeat(4,1fr)}.vitals-values{gap:8px}.pressure-number{font-size:27px}.vital-statuses{gap:4px}.status-badge{font-size:10px;padding:5px 6px}.range-row{grid-template-columns:minmax(0,1fr) 62px 62px}.day-summary{grid-template-columns:repeat(3,1fr)}}
+
+/* ===== Лекарства и напоминания (вкладка «Лекарства») ===== */
+.meds-list{display:flex;flex-direction:column;gap:10px}
+.med-card{display:grid;grid-template-columns:auto minmax(0,1fr);gap:4px 12px;align-items:start;padding:13px;border:1px solid var(--border);border-radius:16px;background:var(--surface);box-shadow:0 4px 14px rgba(27,54,84,.05)}
+.med-card.inactive{opacity:.65}
+.med-time{min-width:56px;font-size:20px;font-weight:850;letter-spacing:-.4px}
+.med-body{min-width:0}
+.med-body-wide{grid-column:1 / -1}
+.med-name{font-size:16px;font-weight:800;overflow-wrap:anywhere}
+.med-sub{margin-top:2px;font-size:13px;color:var(--muted);overflow-wrap:anywhere}
+.med-badge{display:inline-block;margin-top:6px;padding:3px 10px;border:1px solid var(--border);border-radius:999px;background:var(--surface-2);color:var(--muted);font-size:12px;font-weight:800}
+.med-badge.taken{background:var(--success-soft);border-color:var(--success);color:var(--success)}
+.med-badge.skipped{background:var(--surface-3);color:var(--muted)}
+.med-badge.unmarked{background:var(--warning-soft);border-color:var(--warning);color:var(--warning)}
+.med-actions{grid-column:1 / -1;display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:8px}
+.med-btn{min-height:44px;min-width:44px;padding:0 16px;border:1px solid var(--border);border-radius:13px;background:var(--surface-2);color:var(--text);font-size:14px;font-weight:800}
+.med-btn.primary{background:var(--primary);border-color:var(--primary);color:#fff}
+.meds-subhead{margin:8px 2px 0;font-size:12px;font-weight:800;letter-spacing:.4px;text-transform:uppercase;color:var(--muted)}
+.meds-legend{margin:8px 2px 0}
+.rem-switch{margin:0 0 0 auto;min-height:44px}
+.med-hist{display:grid;grid-template-columns:auto minmax(0,1fr);gap:4px 12px;padding:10px 0;border-top:1px solid var(--border)}
+.med-hist-time{min-width:56px;font-size:13px;font-weight:800;color:var(--muted)}
+.meds-history-card .meds-list{margin-top:10px}
+.chips{display:grid;grid-template-columns:repeat(7,1fr);gap:6px}
+.chips input{position:absolute;opacity:0;pointer-events:none;width:1px;height:1px}
+.chips label{display:flex;align-items:center;justify-content:center;min-height:44px;margin:0;padding:0;border:1px solid var(--border);border-radius:12px;background:var(--surface-2);font-size:13px;font-weight:800}
+.chips input:checked+label{background:var(--primary);border-color:var(--primary);color:#fff}
+.times-list{display:flex;flex-direction:column;gap:8px;margin-bottom:8px}
+.time-row{display:flex;align-items:center;gap:8px}
+.time-row input{flex:1}
+.time-row .med-btn{flex:0 0 auto;padding:0}
+.danger-link{display:block;width:100%;margin-top:14px;text-align:center;color:var(--danger);font-size:14px}
+html.theme-dark #med-modal input,html.theme-dark #rem-modal input,html.theme-dark #intake-modal input{color-scheme:dark}
+.push-card .med-actions{margin-top:10px}
+.push-card .field-hint{margin-top:10px}
+.notif-sub{margin-top:14px}
+.settings-section .push-card,
+.settings-section .push-actions{margin-top:0}
