@@ -72,8 +72,16 @@
       <div class="section-label"><strong>График на сегодня</strong></div>
       <div id="meds-today" class="meds-list"><div class="muted">Загрузка…</div></div>
       <p class="field-hint meds-legend">«Не отмечено» — расчёт по расписанию: время приёма прошло, а отметки нет. Это не означает, что лекарство не принято. Отмеченные приёмы уходят в историю приёмов ниже.</p>
-      <div class="section-label"><strong>Мои лекарства</strong><button type="button" class="link-btn" id="med-add-btn">+ Добавить</button></div>
+      <div class="card flat meds-own-card"><details id="meds-list-details" open><summary>Мои лекарства</summary>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:10px 0 12px">
+        <button type="button" class="med-btn primary" id="med-scan-quick-btn">📷 Сканировать</button>
+        <button type="button" class="med-btn" id="med-add-btn">+ Вручную</button>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;margin:0 2px 10px" id="meds-search-wrap"><input id="meds-search" type="search" placeholder="Найти лекарство…" style="flex:1"></div>
       <div id="meds-list" class="meds-list"></div>
+      <button type="button" class="link-btn" id="meds-inactive-toggle" style="margin:4px 2px 0" hidden></button>
+      <div id="meds-list-inactive" class="meds-list" hidden></div>
+      </details></div>
       <p class="field-hint meds-legend">Напоминания об измерениях и уведомления — в «Ещё → Уведомления».</p>
       <div class="card flat meds-history-card"><details id="meds-history-details"><summary>📋 История приёмов (30 дней)</summary><div id="meds-history" class="meds-list"></div></details></div>
       <p class="field-hint meds-legend">Приложение только хранит введённые вами данные и не даёт рекомендаций по лекарствам и дозам. Вопросы о лечении — к врачу.</p>
@@ -133,7 +141,7 @@
 <div id="med-modal" class="modal" hidden><div class="modal-panel"><div class="modal-grabber"></div>
 <div class="modal-head"><div class="quick-icon food">💊</div><div class="modal-title"><h2 id="med-modal-title">Лекарство</h2><p>Название и дозу вводите по назначению врача</p></div><button type="button" class="close-btn" data-close="med-modal" aria-label="Закрыть">×</button></div>
 <form id="med-form" autocomplete="off" novalidate>
-<label for="med-name">Название</label><input id="med-name" maxlength="100">
+<label for=<label for="med-name">Название</label><div class="row"><div style="position:relative;flex:1"><input id="med-name" maxlength="100" style="width:100%" autocomplete="off"><div id="med-name-suggest" class="suggest-box" hidden></div></div><button type="button" id="med-scan-btn" class="link-btn" title="Сканировать штрихкод упаковки">📷 Скан</button></div>
 <div class="row"><div><label for="med-dose">Доза</label><input id="med-dose" type="text" inputmode="decimal" placeholder="Например: 500"></div><div><label for="med-unit">Единица</label><select id="med-unit"></select></div></div>
 <label for="med-instr">Как принимать <span class="muted">(необязательно)</span></label><input id="med-instr" maxlength="200" placeholder="Например: после еды">
 <label>Время приёма</label><div id="med-times" class="times-list"></div><button type="button" class="link-btn" id="med-time-add">+ Добавить время</button>
@@ -144,6 +152,12 @@
 <button type="submit" class="primary-action" id="med-save">Сохранить</button>
 <button type="button" class="link-btn danger-link" id="med-delete" hidden>Удалить лекарство</button>
 <div class="message" id="med-msg"></div></form></div></div>
+<div id="barcode-scan-modal" class="modal" hidden><div class="modal-panel"><div class="modal-grabber"></div>
+<div class="modal-head"><div class="quick-icon food">📷</div><div class="modal-title"><h2>Скан упаковки</h2><p>Наведите камеру на штрихкод или DataMatrix</p></div><button type="button" class="close-btn" data-close="barcode-scan-modal" aria-label="Закрыть">×</button></div>
+<video id="barcode-video" playsinline muted style="width:100%;border-radius:8px;background:#000"></video>
+<p class="message" id="barcode-scan-msg"></p>
+<button type="button" class="link-btn" data-close="barcode-scan-modal">Отмена</button>
+</div></div>
 <div id="rem-modal" class="modal" hidden><div class="modal-panel"><div class="modal-grabber"></div>
 <div class="modal-head"><div class="quick-icon glucose">🔔</div><div class="modal-title"><h2 id="rem-modal-title">Напоминание</h2><p>Напоминание об измерении</p></div><button type="button" class="close-btn" data-close="rem-modal" aria-label="Закрыть">×</button></div>
 <form id="rem-form" autocomplete="off" novalidate>
@@ -184,5 +198,5 @@ var USER_SETTINGS = {{ settings_json | safe }};
 var RANGES = {{ ranges_json | safe }};
 var DEFAULT_RANGES_JS = {{ default_ranges_json | safe }};
 </script>
-{% if is_admin %}<script src="/js/admin.js"></script>{% else %}<script src="/js/app.js?v=2"></script><script src="/js/meds.js?v=3"></script>{% endif %}
+{% if is_admin %}<script src="/js/admin.js"></script>{% else %}<script src="/js/vendor/zxing.min.js"></script><script src="/js/barcode-scan.js?v=1"></script><script src="/js/app.js?v=2"></script><script src="/js/meds.js?v=5"></script>{% endif %}
 </body></html>

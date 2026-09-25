@@ -27,6 +27,7 @@ services:
       - ./pdf_export.py:/app/pdf_export.py:ro
       - ./backup.py:/app/backup.py:ro
       - ./reset_admin_password.py:/app/reset_admin_password.py:ro
+      - ./import_mdlp_gtins.py:/app/import_mdlp_gtins.py:ro
 
     healthcheck:
       test:

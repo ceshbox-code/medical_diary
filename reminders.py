@@ -45,6 +45,10 @@ reminders_bp = Blueprint("reminders", __name__)
 # Единицы дозы — закрытый список, чтобы не копить в базе произвольный текст.
 MED_UNITS = ("мг", "мкг", "г", "мл", "шт", "капли", "ЕД")
 
+# Источник записи о лекарстве — закрытый список; всё, что не входит в
+# перечень, тихо становится 'manual' (см. api_medication_create).
+ALLOWED_MED_SOURCES = ("manual", "barcode_scan")
+
 REMINDER_KINDS = {
     "glucose": "Измерить глюкозу",
     "vitals": "Измерить давление и пульс",
@@ -281,6 +285,11 @@ def api_medication_create():
     except ValueError as e:
         return jsonify(error=str(e)), 400
 
+    # Источник не влияет на валидацию и не выбирается пользователем в форме —
+    # это факт о происхождении записи (обычный ввод или подстановка после
+    # скана штрихкода). Всё, кроме известных значений, тихо становится 'manual'.
+    source = data.get("source") if data.get("source") in ALLOWED_MED_SOURCES else "manual"
+
     db = get_db()
     count = db.execute(
         "SELECT COUNT(*) AS c FROM medications WHERE user_id = ? AND deleted_at IS NULL",
@@ -291,10 +300,10 @@ def api_medication_create():
 
     cur = db.execute(
         "INSERT INTO medications (user_id, name, dose_value, dose_unit, instructions, start_date, end_date, is_active, comment, days_mask, source) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'manual')",
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (session["user_id"], fields["name"], fields["dose_value"], fields["dose_unit"],
          fields["instructions"], fields["start_date"], fields["end_date"], fields["is_active"],
-         fields["comment"], fields["days_mask"]),
+         fields["comment"], fields["days_mask"], source),
     )
     med_id = cur.lastrowid
     db.executemany(
@@ -303,7 +312,7 @@ def api_medication_create():
     )
     db.commit()
 
-    audit("create_medication", "medications", med_id, {"times": len(times)})
+    audit("create_medication", "medications", med_id, {"times": len(times), "source": source})
     result = {"ok": True, "id": med_id}
     store_idempotent_response(session["user_id"], "api_medication_create", idem_key, "medications", med_id, result)
     return jsonify(result)
@@ -365,6 +374,112 @@ def api_medication_delete(med_id):
     db.commit()
     audit("delete_medication", "medications", med_id, {})
     return jsonify(ok=True)
+
+
+# --------------------------------------------- справочник «GTIN -> название»
+#
+# Помогает быстрее заносить название лекарства: пользователь сканирует
+# штрихкод/DataMatrix упаковки на клиенте (сам код декодируется в браузере,
+# сюда попадает уже готовый GTIN), один раз подтверждает название и дозу —
+# дальше при повторном скане той же упаковки они подставляются сами.
+# Справочник строго персональный (привязан к user_id), к внешним реестрам
+# лекарств (ИС МДЛП/«Честный знак» и т.п.) сервис не обращается.
+
+def _valid_gtin(raw):
+    s = str(raw or "").strip()
+    if not s.isdigit() or not (8 <= len(s) <= 14):
+        raise ValueError("Код товара: ожидается GTIN (8–14 цифр)")
+    return s
+
+
+@reminders_bp.get("/api/medication-barcodes/<gtin>")
+@login_required
+def api_medication_barcode_lookup(gtin):
+    try:
+        gtin = _valid_gtin(gtin)
+    except ValueError as e:
+        return jsonify(error=str(e)), 400
+    db = get_db()
+
+    # 1. Личный справочник пользователя — то, что он сам подтвердил
+    # раньше, приоритетнее официальных данных (мог поправить написание).
+    row = db.execute(
+        "SELECT name, dose_value, dose_unit FROM medication_barcodes WHERE user_id = ? AND gtin = ?",
+        (session["user_id"], gtin),
+    ).fetchone()
+    if row:
+        return jsonify(found=True, source="personal",
+                        name=row["name"], dose_value=row["dose_value"], dose_unit=row["dose_unit"])
+
+    # 2. Официальные открытые данные ЦРПТ (см. import_mdlp_gtins.py).
+    # Дозу отсюда отдаём только как текстовую подсказку (dose_hint) —
+    # формат свободный ("0.25 мг/г", "250 МЕ" и т.п.), надёжно разложить
+    # его в наши value/unit нельзя, а молча подставлять непроверенную
+    # дозу в медицинском контексте небезопасно.
+    ref = db.execute(
+        "SELECT prod_sell_name, dose_raw, form_name FROM mdlp_gtins WHERE gtin = ?",
+        (gtin,),
+    ).fetchone()
+    if ref and ref["prod_sell_name"]:
+        return jsonify(found=True, source="mdlp",
+                        name=ref["prod_sell_name"], dose_hint=ref["dose_raw"], form_hint=ref["form_name"])
+
+    return jsonify(found=False)
+
+
+@reminders_bp.put("/api/medication-barcodes/<gtin>")
+@login_required
+def api_medication_barcode_save(gtin):
+    data = _json_body()
+    if data is None:
+        return _bad_request()
+    try:
+        gtin = _valid_gtin(gtin)
+        name = _text(data.get("name"), 100, "Название", required=True)
+        dose_value = dose_unit = None
+        raw_v = data.get("dose_value")
+        if raw_v is not None and str(raw_v).strip() != "":
+            dose_value = parse_float(raw_v, 0.001, 100000, "Доза")
+            dose_unit = str(data.get("dose_unit") or "").strip()
+            if dose_unit not in MED_UNITS:
+                raise ValueError("Доза: выберите единицу (" + ", ".join(MED_UNITS) + ")")
+    except ValueError as e:
+        return jsonify(error=str(e)), 400
+
+    db = get_db()
+    db.execute(
+        "INSERT INTO medication_barcodes (user_id, gtin, name, dose_value, dose_unit) VALUES (?, ?, ?, ?, ?) "
+        "ON CONFLICT(user_id, gtin) DO UPDATE SET "
+        "name = excluded.name, dose_value = excluded.dose_value, dose_unit = excluded.dose_unit, "
+        "updated_at = datetime('now')",
+        (session["user_id"], gtin, name, dose_value, dose_unit),
+    )
+    row_id = db.execute(
+        "SELECT id FROM medication_barcodes WHERE user_id = ? AND gtin = ?",
+        (session["user_id"], gtin),
+    ).fetchone()["id"]
+    db.commit()
+    audit("save_medication_barcode", "medication_barcodes", row_id, {"gtin": gtin})
+    return jsonify(ok=True)
+
+
+@reminders_bp.get("/api/medications/suggest")
+@login_required
+def api_medications_suggest():
+    """Подсказки по названию при ручном вводе — по локальному кэшу открытых
+    данных ЦРПТ (mdlp_gtins), без обращения куда-либо в сеть. Не персональные
+    данные: это справочник лекарств, а не записи пользователя."""
+    q = (request.args.get("q") or "").strip().lower()
+    if len(q) < 2:
+        return jsonify(items=[])
+    like = "%" + q.replace("%", "").replace("_", "") + "%"
+    rows = get_db().execute(
+        "SELECT DISTINCT prod_sell_name FROM mdlp_gtins "
+        "WHERE prod_sell_name_norm LIKE ? AND reg_status = 'Действующий' "
+        "ORDER BY prod_sell_name LIMIT 10",
+        (like,),
+    ).fetchall()
+    return jsonify(items=[r["prod_sell_name"] for r in rows])
 
 
 # --------------------------------------------------- график на день и журнал

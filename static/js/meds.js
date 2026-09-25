@@ -33,7 +33,7 @@
     temperature: 'Измерить температуру', food: 'Записать приём пищи', custom: ''
   };
 
-  var state = { meds: [], reminders: [], schedule: null };
+  var state = { meds: [], reminders: [], schedule: null, medsFilter: '', medsInactiveOpen: false };
   var loadSeq = 0;
 
   /* ------------------------------------------------------------ утилиты */
@@ -102,11 +102,14 @@
 
   /* ------------------------------------------------------- модальные окна */
 
-  var MODALS = ['med-modal', 'rem-modal', 'intake-modal'];
+  var MODALS = ['med-modal', 'rem-modal', 'intake-modal', 'barcode-scan-modal'];
   function openModal(id) { $(id).hidden = false; document.body.style.overflow = 'hidden'; }
   function closeModal(id) {
     var m = $(id);
     if (m) { m.hidden = true; }
+    // Закрытие модалки сканирования любым способом (кнопка, backdrop,
+    // Escape) должно гасить камеру, а не только прятать оверлей.
+    if (id === 'barcode-scan-modal' && window.BarcodeScan) { window.BarcodeScan.cancel(); }
     var anyOpen = MODALS.some(function (x) { var e = $(x); return e && !e.hidden; });
     if (!anyOpen) { document.body.style.overflow = ''; }
   }
@@ -243,33 +246,58 @@
     pending.forEach(function (slot) { box.appendChild(slotCard(slot)); });
   }
 
+  function medCard(m) {
+    var card = h('div', 'med-card' + (m.is_active ? '' : ' inactive'));
+    var body = h('div', 'med-body med-body-wide');
+    body.appendChild(h('div', 'med-name', m.name));
+    var sub = joinParts([fmtDose(m.dose_value, m.dose_unit), m.instructions]);
+    if (sub) { body.appendChild(h('div', 'med-sub', sub)); }
+    var when = m.times.length ? m.times.join(', ') + ' · ' + fmtDayList(m.days) : 'без графика (по мере необходимости)';
+    body.appendChild(h('div', 'med-sub', when));
+    if (m.end_date) { body.appendChild(h('div', 'med-sub', 'до ' + fmtDate(m.end_date))); }
+    if (!m.is_active) { body.appendChild(badge('skipped', 'Приостановлено')); }
+    card.appendChild(body);
+    var actions = h('div', 'med-actions');
+    var now = h('button', 'med-btn', 'Принял сейчас');
+    now.type = 'button';
+    now.addEventListener('click', function () { markNow(m, now); });
+    var edit = h('button', 'med-btn', 'Изменить');
+    edit.type = 'button';
+    edit.addEventListener('click', function () { openMedModal(m); });
+    actions.appendChild(now);
+    actions.appendChild(edit);
+    card.appendChild(actions);
+    return card;
+  }
+
   function renderMeds() {
+    var q = (state.medsFilter || '').trim().toLowerCase();
+    var filtered = q ? state.meds.filter(function (m) { return m.name.toLowerCase().indexOf(q) !== -1; }) : state.meds;
+    var active = filtered.filter(function (m) { return m.is_active; });
+    var inactive = filtered.filter(function (m) { return !m.is_active; });
+
     var box = $('meds-list');
     clear(box);
-    if (!state.meds.length) { box.appendChild(h('div', 'muted', 'Список пуст.')); return; }
-    state.meds.forEach(function (m) {
-      var card = h('div', 'med-card' + (m.is_active ? '' : ' inactive'));
-      var body = h('div', 'med-body med-body-wide');
-      body.appendChild(h('div', 'med-name', m.name));
-      var sub = joinParts([fmtDose(m.dose_value, m.dose_unit), m.instructions]);
-      if (sub) { body.appendChild(h('div', 'med-sub', sub)); }
-      var when = m.times.length ? m.times.join(', ') + ' · ' + fmtDayList(m.days) : 'без графика (по мере необходимости)';
-      body.appendChild(h('div', 'med-sub', when));
-      if (m.end_date) { body.appendChild(h('div', 'med-sub', 'до ' + fmtDate(m.end_date))); }
-      if (!m.is_active) { body.appendChild(badge('skipped', 'Приостановлено')); }
-      card.appendChild(body);
-      var actions = h('div', 'med-actions');
-      var now = h('button', 'med-btn', 'Принял сейчас');
-      now.type = 'button';
-      now.addEventListener('click', function () { markNow(m, now); });
-      var edit = h('button', 'med-btn', 'Изменить');
-      edit.type = 'button';
-      edit.addEventListener('click', function () { openMedModal(m); });
-      actions.appendChild(now);
-      actions.appendChild(edit);
-      card.appendChild(actions);
-      box.appendChild(card);
-    });
+    if (!state.meds.length) {
+      box.appendChild(h('div', 'muted', 'Список пуст.'));
+    } else if (!active.length) {
+      box.appendChild(h('div', 'muted', q ? 'Ничего не найдено.' : 'Активных лекарств нет — все приостановлены или завершены, см. ниже.'));
+    } else {
+      active.forEach(function (m) { box.appendChild(medCard(m)); });
+    }
+
+    var inactiveBox = $('meds-list-inactive');
+    var toggle = $('meds-inactive-toggle');
+    clear(inactiveBox);
+    if (!inactive.length) {
+      toggle.hidden = true;
+      inactiveBox.hidden = true;
+      return;
+    }
+    toggle.hidden = false;
+    toggle.textContent = (state.medsInactiveOpen ? '▾ Скрыть' : '▸ Показать') + ' неактивные и завершённые · ' + inactive.length;
+    inactiveBox.hidden = !state.medsInactiveOpen;
+    inactive.forEach(function (m) { inactiveBox.appendChild(medCard(m)); });
   }
 
   function renderReminders() {
@@ -450,8 +478,43 @@
 
   var medCtx = null;
 
+  function hideMedNameSuggest() {
+    var box = $('med-name-suggest');
+    if (box) { box.hidden = true; clear(box); }
+  }
+
+  var medNameSuggestSeq = 0;
+  async function fetchMedNameSuggest(q) {
+    var seq = ++medNameSuggestSeq;
+    var items;
+    try {
+      var r = await api('GET', '/api/medications/suggest?q=' + encodeURIComponent(q));
+      items = r.items || [];
+    } catch (e) {
+      hideMedNameSuggest();
+      return;
+    }
+    if (seq !== medNameSuggestSeq) { return; } // пришёл ответ на уже неактуальный запрос
+    var box = $('med-name-suggest');
+    if (!box) { return; }
+    clear(box);
+    if (!items.length) { box.hidden = true; return; }
+    items.forEach(function (name) {
+      var row = h('div', 'suggest-item', name);
+      // mousedown, а не click — чтобы сработать раньше blur у поля ввода
+      row.addEventListener('mousedown', function (e) {
+        e.preventDefault();
+        $('med-name').value = name;
+        hideMedNameSuggest();
+      });
+      box.appendChild(row);
+    });
+    box.hidden = false;
+  }
+
   function openMedModal(med) {
-    medCtx = { id: med ? med.id : null, idem: med ? null : 'med-' + uuid() };
+    medCtx = { id: med ? med.id : null, idem: med ? null : 'med-' + uuid(), gtin: null };
+    hideMedNameSuggest();
     $('med-modal-title').textContent = med ? 'Изменить лекарство' : 'Новое лекарство';
     $('med-name').value = med ? med.name : '';
     $('med-dose').value = med && med.dose_value !== null ? fmtNum(med.dose_value) : '';
@@ -473,6 +536,43 @@
     openModal('med-modal');
   }
 
+  /* Скан штрихкода/DataMatrix упаковки — только подстановка названия и
+   * дозы в форму, ничего не сохраняет само по себе. Пользователь всегда
+   * может поправить подставленное перед сохранением. */
+  async function scanMedBarcode() {
+    setMsg('barcode-scan-msg', 'Наведите камеру на штрихкод упаковки', true);
+    openModal('barcode-scan-modal');
+    var gtin;
+    try {
+      gtin = await BarcodeScan.scanOnce('barcode-video');
+    } catch (e) {
+      closeModal('barcode-scan-modal');
+      toast(e.message || 'Не удалось отсканировать код', false);
+      return;
+    }
+    closeModal('barcode-scan-modal');
+    medCtx.gtin = gtin;
+    try {
+      var found = await api('GET', '/api/medication-barcodes/' + encodeURIComponent(gtin));
+      if (found.found && found.source === 'personal') {
+        $('med-name').value = found.name;
+        $('med-dose').value = found.dose_value !== null && found.dose_value !== undefined ? fmtNum(found.dose_value) : '';
+        if (found.dose_unit) { $('med-unit').value = found.dose_unit; }
+        toast('Название и доза подставлены из вашего справочника — проверьте перед сохранением', true);
+      } else if (found.found && found.source === 'mdlp') {
+        $('med-name').value = found.name;
+        var hint = found.dose_hint ? (' Доза по данным маркировки: ' + found.dose_hint + '.') : '';
+        toast('Название подставлено из открытых данных «Честного знака».' + hint + ' Впишите дозу и проверьте название перед сохранением', true);
+      } else {
+        toast('Код не найден ни в вашем справочнике, ни в открытых данных — введите название, оно запомнится', true);
+      }
+    } catch (e) {
+      // Поиск в справочнике не критичен для продолжения — просто не
+      // подставляем название, пользователь вводит его сам.
+      toast('Код отсканирован, но справочник недоступен — введите название вручную', false);
+    }
+  }
+
   async function saveMed(ev) {
     ev.preventDefault();
     var name = $('med-name').value.trim();
@@ -491,13 +591,27 @@
       start_date: $('med-start').value,
       end_date: $('med-end').value,
       comment: $('med-comment').value.trim(),
-      is_active: $('med-active').checked
+      is_active: $('med-active').checked,
+      source: medCtx.gtin ? 'barcode_scan' : 'manual'
     };
     var btn = $('med-save');
     btn.disabled = true;
     try {
       if (medCtx.id) { await api('PATCH', '/api/medications/' + medCtx.id, payload); }
       else { await api('POST', '/api/medications', payload, medCtx.idem); }
+      if (medCtx.gtin) {
+        // Обновляем личный справочник «GTIN → название» под итоговым,
+        // возможно поправленным пользователем текстом. Не критично для
+        // основного сохранения — ошибку здесь не показываем пользователю
+        // как провал операции, само лекарство уже сохранено.
+        try {
+          await api('PUT', '/api/medication-barcodes/' + encodeURIComponent(medCtx.gtin), {
+            name: name,
+            dose_value: payload.dose_value,
+            dose_unit: payload.dose_unit
+          });
+        } catch (e) { /* не критично для основного сохранения */ }
+      }
       closeModal('med-modal');
       toast('Сохранено', true);
       load();
@@ -631,6 +745,39 @@
   /* --------------------------------------------------------- привязка событий */
 
   $('med-add-btn').addEventListener('click', function () { openMedModal(null); });
+  if ($('med-scan-btn')) { $('med-scan-btn').addEventListener('click', scanMedBarcode); }
+  // Быстрый вход в скан прямо со страницы списка, без промежуточного шага
+  // «сначала открой пустую форму, потом заметь мелкую ссылку скана внутри».
+  if ($('med-scan-quick-btn')) {
+    $('med-scan-quick-btn').addEventListener('click', function () {
+      openMedModal(null);
+      scanMedBarcode();
+    });
+  }
+  if ($('meds-search')) {
+    $('meds-search').addEventListener('input', function (e) {
+      state.medsFilter = e.target.value;
+      renderMeds();
+    });
+  }
+  if ($('meds-inactive-toggle')) {
+    $('meds-inactive-toggle').addEventListener('click', function () {
+      state.medsInactiveOpen = !state.medsInactiveOpen;
+      renderMeds();
+    });
+  }
+  if ($('med-name')) {
+    var medNameSuggestTimer = null;
+    $('med-name').addEventListener('input', function (e) {
+      var q = e.target.value.trim();
+      clearTimeout(medNameSuggestTimer);
+      if (q.length < 2) { hideMedNameSuggest(); return; }
+      medNameSuggestTimer = setTimeout(function () { fetchMedNameSuggest(q); }, 250);
+    });
+    $('med-name').addEventListener('blur', function () {
+      setTimeout(hideMedNameSuggest, 150); // даём mousedown на подсказке сработать раньше
+    });
+  }
   $('rem-add-btn').addEventListener('click', function () { openRemModal(null); });
   $('med-time-add').addEventListener('click', function () { addTimeRow(''); });
   $('med-form').addEventListener('submit', saveMed);
