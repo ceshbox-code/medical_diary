@@ -320,6 +320,22 @@ CREATE TABLE IF NOT EXISTS mdlp_gtins (
 -- колонка ещё не появилась) CREATE TABLE IF NOT EXISTS окажется no-op'ом,
 -- а этот CREATE INDEX упадёт с "no such column" при старте приложения.
 
+-- Журнал автоматических импортов выгрузок ЦРПТ (см. mdlp_watcher.py).
+-- Уникальность по (filename, size, mtime), а не только по имени файла —
+-- имя каждую неделю меняется (дата в названии), а размер+время изменения
+-- достаточно дёшевы для проверки "этот файл уже импортировали или нет" без
+-- перечитывания и хеширования полного файла (десятки МБ) на каждой проверке.
+CREATE TABLE IF NOT EXISTS mdlp_import_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  filename TEXT NOT NULL,
+  size INTEGER NOT NULL,
+  mtime REAL NOT NULL,
+  status TEXT NOT NULL,   -- 'ok' / 'error'
+  detail TEXT,            -- текст ошибки, если status='error'
+  imported_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (filename, size, mtime)
+);
+
 -- Напоминания об измерениях (не о лекарствах — те строятся из графика).
 CREATE TABLE IF NOT EXISTS reminders (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

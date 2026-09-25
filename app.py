@@ -50,6 +50,7 @@ from ai_utils import (
 from db import DATABASE, SCHEMA, get_db, close_db, init_db
 from reminders import reminders_bp
 from push import push_bp, start_push_scheduler
+from mdlp_watcher import start_mdlp_watcher
 from security import (
     audit,
     LOGIN_MAX_ATTEMPTS,
@@ -233,6 +234,11 @@ else:
 # gunicorn (--workers 1), поэтому поток запускается один раз; повторную
 # отправку всё равно исключает журнал notification_deliveries.
 start_push_scheduler(app)
+
+# Наблюдатель за каталогом с еженедельными выгрузками ЦРПТ (GTIN -> лекарство,
+# см. mdlp_watcher.py) — просто положить новый файл в /data/mdlp_import/,
+# импорт запустится сам при следующей проверке.
+start_mdlp_watcher(app)
 
 
 @app.get("/health")
