@@ -767,6 +767,40 @@ def admin_list_backups():
     )
 
 
+LOGIN_LOG_ACTIONS = ("login_success", "login_failed", "login_blocked", "login_webauthn", "logout")
+
+
+@app.get("/api/admin/login-log")
+@admin_required
+def admin_login_log():
+    limit = min(max(int(request.args.get("limit", 200) or 200), 1), 500)
+    placeholders = ",".join("?" * len(LOGIN_LOG_ACTIONS))
+    rows = get_db().execute(
+        f"SELECT a.id, a.action, a.user_id, a.ip_address, a.user_agent, a.details_json, a.created_at, "
+        f"u.username AS user_username, u.display_name "
+        f"FROM audit_log a LEFT JOIN users u ON u.id = a.user_id "
+        f"WHERE a.action IN ({placeholders}) "
+        f"ORDER BY a.id DESC LIMIT ?",
+        (*LOGIN_LOG_ACTIONS, limit),
+    ).fetchall()
+    items = []
+    for r in rows:
+        try:
+            details = json.loads(r["details_json"]) if r["details_json"] else {}
+        except (TypeError, ValueError):
+            details = {}
+        items.append({
+            "id": r["id"],
+            "action": r["action"],
+            "username": r["user_username"] or details.get("username") or None,
+            "display_name": r["display_name"],
+            "ip_address": r["ip_address"],
+            "user_agent": r["user_agent"],
+            "created_at": r["created_at"],
+        })
+    return jsonify(items=items)
+
+
 @app.post("/api/admin/backups/run")
 @admin_required
 def admin_run_backup():

@@ -228,6 +228,70 @@
     }
   }
 
+  var LOGIN_ACTION_LABELS = {
+    login_success: 'Вход выполнен',
+    login_failed: 'Неверный пароль',
+    login_blocked: 'Заблокировано (много попыток)',
+    login_webauthn: 'Вход через passkey/Face ID',
+    logout: 'Выход'
+  };
+
+  async function loadLoginLog() {
+    try {
+      var res = await fetch('/api/admin/login-log');
+      if (res.status === 401) { window.location = '/login'; return; }
+      var out = await res.json();
+      if (!res.ok) throw new Error(out.error || ('HTTP ' + res.status));
+
+      var tbody = document.querySelector('#login-log-table tbody');
+      if (!tbody) return;
+      tbody.innerHTML = '';
+
+      var items = out.items || [];
+      if (!items.length) {
+        var emptyRow = document.createElement('tr');
+        var emptyCell = document.createElement('td');
+        emptyCell.colSpan = 5;
+        emptyCell.textContent = 'Записей пока нет';
+        emptyRow.appendChild(emptyCell);
+        tbody.appendChild(emptyRow);
+      }
+
+      items.forEach(function (it) {
+        var tr = document.createElement('tr');
+        if (it.action === 'login_failed' || it.action === 'login_blocked') {
+          tr.className = 'login-log-row-warn';
+        }
+
+        var td1 = document.createElement('td');
+        td1.textContent = it.created_at;
+        tr.appendChild(td1);
+
+        var td2 = document.createElement('td');
+        td2.textContent = LOGIN_ACTION_LABELS[it.action] || it.action;
+        tr.appendChild(td2);
+
+        var td3 = document.createElement('td');
+        td3.textContent = it.display_name ? (it.display_name + ' (' + it.username + ')') : (it.username || '—');
+        tr.appendChild(td3);
+
+        var td4 = document.createElement('td');
+        td4.textContent = it.ip_address || '—';
+        tr.appendChild(td4);
+
+        var td5 = document.createElement('td');
+        var ua = it.user_agent || '';
+        td5.textContent = ua.length > 40 ? (ua.slice(0, 40) + '…') : (ua || '—');
+        td5.title = ua;
+        tr.appendChild(td5);
+
+        tbody.appendChild(tr);
+      });
+    } catch (err) {
+      setMsg('login-log-msg', friendlyErrorMessage(err), false);
+    }
+  }
+
   document.addEventListener('DOMContentLoaded', function () {
     document.querySelectorAll('summary').forEach(function (summary) {
       summary.addEventListener('click', function (e) {
@@ -283,5 +347,6 @@
 
     loadUsers();
     loadBackupStatus();
+    loadLoginLog();
   });
 })();
