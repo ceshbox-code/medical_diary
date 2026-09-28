@@ -84,7 +84,16 @@
       <div id="meds-list-inactive" class="meds-list" hidden></div>
       </details></div>
       <p class="field-hint meds-legend">Напоминания об измерениях и уведомления — в «Ещё → Уведомления».</p>
-      <div class="card flat meds-history-card"><details id="meds-history-details"><summary>📋 История приёмов (30 дней)</summary><div id="meds-history" class="meds-list"></div></details></div>
+      <div class="card flat meds-history-card"><details id="meds-history-details"><summary>📋 История приёмов (30 дней)</summary><button type="button" class="med-btn primary" id="med-export-btn" style="width:100%;margin:14px 0 10px">📄 Экспорт в PDF за период…</button><div id="meds-history" class="meds-list"></div></details></div>
+      <div id="med-export-modal" class="modal" hidden><div class="modal-panel"><div class="modal-grabber"></div>
+      <div class="modal-head"><div class="quick-icon food">📄</div><div class="modal-title"><h2>Экспорт истории в PDF</h2><p>По дням, с отметками «принято»/«пропущено»</p></div><button type="button" class="close-btn" data-close="med-export-modal" aria-label="Закрыть">×</button></div>
+      <label for="med-export-from">С</label><input id="med-export-from" type="date">
+      <label for="med-export-to">По</label><input id="med-export-to" type="date">
+      <label class="switch-row"><span>Выбрать все лекарства</span><input type="checkbox" id="med-export-all" checked><span class="switch"></span></label>
+      <div id="med-export-list" class="meds-list" style="margin:6px 0 4px"></div>
+      <button type="button" class="primary-action" id="med-export-submit">Сформировать PDF</button>
+      <div class="message" id="med-export-msg"></div>
+      </div></div>
       <p class="field-hint meds-legend">Приложение только хранит введённые вами данные и не даёт рекомендаций по лекарствам и дозам. Вопросы о лечении — к врачу.</p>
     </section>
     <section id="page-settings" class="tab-page" hidden>
@@ -155,7 +164,10 @@
 <div class="message" id="med-msg"></div></form></div></div>
 <div id="barcode-scan-modal" class="modal" hidden><div class="modal-panel"><div class="modal-grabber"></div>
 <div class="modal-head"><div class="quick-icon food">📷</div><div class="modal-title"><h2>Скан упаковки</h2><p>Наведите камеру на штрихкод или DataMatrix</p></div><button type="button" class="close-btn" data-close="barcode-scan-modal" aria-label="Закрыть">×</button></div>
-<video id="barcode-video" playsinline muted style="width:100%;border-radius:8px;background:#000"></video>
+<div style="position:relative;border-radius:16px;overflow:hidden;background:#000">
+<video id="barcode-video" playsinline muted style="width:100%;display:block"></video>
+<div style="position:absolute;top:19%;left:19%;width:62%;height:62%;border:3px solid rgba(255,255,255,.85);border-radius:20px;box-shadow:0 0 0 999px rgba(0,0,0,.35);pointer-events:none"></div>
+</div>
 <p class="message" id="barcode-scan-msg"></p>
 <button type="button" class="link-btn" data-close="barcode-scan-modal">Отмена</button>
 </div></div>
@@ -199,5 +211,5 @@ var USER_SETTINGS = {{ settings_json | safe }};
 var RANGES = {{ ranges_json | safe }};
 var DEFAULT_RANGES_JS = {{ default_ranges_json | safe }};
 </script>
-{% if is_admin %}<script src="/js/admin.js"></script>{% else %}<script src="/js/vendor/zxing.min.js"></script><script src="/js/barcode-scan.js?v=1"></script><script src="/js/app.js?v=2"></script><script src="/js/meds.js?v=5"></script>{% endif %}
+{% if is_admin %}<script src="/js/admin.js"></script>{% else %}<script src="/js/vendor/zxing.min.js"></script><script src="/js/barcode-scan.js?v=1"></script><script src="/js/app.js?v=2"></script><script src="/js/meds.js?v=6"></script>{% endif %}
 </body></html>

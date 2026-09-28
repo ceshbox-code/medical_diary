@@ -327,6 +327,179 @@ def format_day_ru(day_str):
         return day_str
 
 
+def _fmt_dose(value, unit):
+    if value is None:
+        return ""
+    v = f"{value:g}"
+    return f"{v} {unit}" if unit else v
+
+
+def query_medication_intakes(user_id, medication_ids=None, date_from=None, date_to=None):
+    """Выборка ЖУРНАЛА ФАКТОВ приёма лекарств (medication_intakes) для отчёта.
+
+    medication_ids: список id конкретных лекарств для фильтра (в том числе
+    неактивных/завершённых — это отчёт по истории, а не по текущему списку
+    для редактирования), либо None/пусто = все лекарства пользователя.
+
+    Возвращает (intakes, meds_by_id, d_from, d_to). meds_by_id — только
+    выбранные лекарства (для заголовка отчёта).
+    """
+    today = date.today()
+    default_from = today - timedelta(days=30)
+
+    d_from_date = parse_iso_date(date_from, default_from)
+    d_to_date = parse_iso_date(date_to, today)
+    if d_from_date > d_to_date:
+        raise ValueError("Начальная дата не может быть позже конечной")
+    if (d_to_date - d_from_date).days > MAX_HISTORY_RANGE_DAYS:
+        raise ValueError(f"Диапазон дат не может превышать {MAX_HISTORY_RANGE_DAYS} дней")
+    d_from = d_from_date.isoformat()
+    d_to = d_to_date.isoformat()
+
+    db = get_db()
+
+    all_meds = db.execute(
+        "SELECT id, name FROM medications WHERE user_id = ? ORDER BY name",
+        (user_id,),
+    ).fetchall()
+    all_med_ids = {r["id"] for r in all_meds}
+
+    if medication_ids:
+        selected_ids = [mid for mid in medication_ids if mid in all_med_ids]
+        if not selected_ids:
+            raise ValueError("Ни одно из выбранных лекарств не найдено")
+    else:
+        selected_ids = list(all_med_ids)
+
+    meds_by_id = {r["id"]: r["name"] for r in all_meds if r["id"] in selected_ids}
+
+    if not selected_ids:
+        return [], meds_by_id, d_from, d_to
+
+    placeholders = ",".join("?" * len(selected_ids))
+    rows = db.execute(
+        f"""
+        SELECT * FROM medication_intakes
+        WHERE user_id = ? AND deleted_at IS NULL
+          AND medication_id IN ({placeholders})
+          AND date(COALESCE(taken_at, scheduled_at)) >= date(?)
+          AND date(COALESCE(taken_at, scheduled_at)) <= date(?)
+        ORDER BY COALESCE(taken_at, scheduled_at)
+        """,
+        (user_id, *selected_ids, d_from, d_to),
+    ).fetchall()
+
+    intakes = [
+        {
+            "id": r["id"],
+            "medication_id": r["medication_id"],
+            "medication_name": r["medication_name"],
+            "dose_value": r["dose_value"],
+            "dose_unit": r["dose_unit"],
+            "moment": r["taken_at"] or r["scheduled_at"],
+            "status": r["status"],
+            "comment": r["comment"] or "",
+        }
+        for r in rows
+    ]
+    return intakes, meds_by_id, d_from, d_to
+
+
+def build_medication_pdf(intakes, meds_by_id, d_from, d_to, owner_name=""):
+    """PDF-отчёт по приёму лекарств — по дням (один день = один блок,
+    внутри — все выбранные лекарства этого дня), как согласовано отдельно
+    от общего дневника измерений (build_pdf выше)."""
+    buffer = BytesIO()
+
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        leftMargin=12 * mm,
+        rightMargin=12 * mm,
+        topMargin=12 * mm,
+        bottomMargin=12 * mm,
+        title="Медицинский дневник — приём лекарств",
+    )
+
+    title_style = ParagraphStyle("Title", fontName=FONT_NAME, fontSize=14, leading=18, spaceAfter=4)
+    normal_style = ParagraphStyle("Normal", fontName=FONT_NAME, fontSize=8, leading=10)
+    day_style = ParagraphStyle("Day", fontName=FONT_NAME, fontSize=11, leading=14, spaceBefore=6, spaceAfter=3)
+    header_style = ParagraphStyle("Header", fontName=FONT_NAME, fontSize=8, leading=10)
+    cell_style = ParagraphStyle("Cell", fontName=FONT_NAME, fontSize=8, leading=10)
+
+    med_names = sorted(meds_by_id.values())
+    if not med_names:
+        meds_label = "Лекарства: (ничего не выбрано)"
+    elif len(med_names) == 1:
+        meds_label = f"Лекарство: {med_names[0]}"
+    else:
+        meds_label = "Лекарства: " + ", ".join(med_names)
+
+    elements = [
+        Paragraph("Медицинский дневник — приём лекарств", title_style),
+        Paragraph(f"Период: {escape(d_from)} — {escape(d_to)}", normal_style),
+        Paragraph(f"Пользователь: {escape(owner_name)}", normal_style),
+        Paragraph(escape(meds_label), normal_style),
+        Paragraph(
+            "В отчёте — только то, что фактически отмечено в приложении "
+            "(«Принято» или «Пропущено»). Плановые приёмы по графику, которые "
+            "пользователь никак не отметил, здесь не показаны — отсутствие "
+            "отметки не равнозначно факту пропуска.",
+            normal_style,
+        ),
+        Paragraph("Данные введены пользователем и не являются медицинским заключением.", normal_style),
+        Spacer(1, 6 * mm),
+    ]
+
+    if not intakes:
+        elements.append(Paragraph("Нет отмеченных приёмов за выбранный период.", normal_style))
+    else:
+        days = {}
+        for it in intakes:
+            days.setdefault((it["moment"] or "")[:10], []).append(it)
+
+        for day in sorted(days.keys()):
+            day_items = sorted(days[day], key=lambda x: x["moment"] or "")
+            elements.append(Paragraph(escape(format_day_ru(day)), day_style))
+
+            data = [[
+                Paragraph("Время", header_style),
+                Paragraph("Лекарство", header_style),
+                Paragraph("Доза", header_style),
+                Paragraph("Статус", header_style),
+                Paragraph("Комментарий", header_style),
+            ]]
+            for it in day_items:
+                time_part = (it["moment"] or "")[11:16] or "-"
+                status_label = "Принято" if it["status"] == "taken" else "Пропущено"
+                data.append([
+                    Paragraph(escape(time_part), cell_style),
+                    Paragraph(escape(it["medication_name"]), cell_style),
+                    Paragraph(escape(_fmt_dose(it["dose_value"], it["dose_unit"])) or "-", cell_style),
+                    Paragraph(escape(status_label), cell_style),
+                    Paragraph(escape(it["comment"]) or "-", cell_style),
+                ])
+
+            table = Table(data, repeatRows=1, colWidths=[18 * mm, 45 * mm, 25 * mm, 25 * mm, 73 * mm])
+            style_commands = [
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#eeeeee")),
+                ("GRID", (0, 0), (-1, -1), 0.25, colors.black),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("TOPPADDING", (0, 0), (-1, -1), 2),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+            ]
+            for i, it in enumerate(day_items, start=1):
+                if it["status"] == "skipped":
+                    style_commands.append(("BACKGROUND", (0, i), (-1, i), colors.HexColor(STATUS_COLORS["high"])))
+            table.setStyle(TableStyle(style_commands))
+            elements.append(table)
+            elements.append(Spacer(1, 4 * mm))
+
+    doc.build(elements)
+    buffer.seek(0)
+    return buffer
+
+
 def build_pdf(entries, d_from, d_to, sort="date", filter_label="Все записи", owner_name="", ai_used=False):
     buffer = BytesIO()
 

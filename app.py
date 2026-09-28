@@ -86,6 +86,8 @@ from pdf_export import (
     _parse_entry_types,
     query_entries,
     build_pdf,
+    query_medication_intakes,
+    build_medication_pdf,
 )
 from backup import (
     BACKUP_ENABLED,
@@ -737,6 +739,51 @@ def export_pdf():
         buffer,
         mimetype="application/pdf",
         as_attachment=True,
+        download_name=filename,
+    )
+
+
+@app.get("/export-medications.pdf")
+@login_required
+def export_medications_pdf():
+    ids_param = request.args.get("medication_ids", "")
+    medication_ids = None
+    if ids_param:
+        try:
+            medication_ids = [int(x) for x in ids_param.split(",") if x.strip()]
+        except ValueError:
+            return jsonify(error="Некорректный список лекарств"), 400
+
+    try:
+        intakes, meds_by_id, d_from, d_to = query_medication_intakes(
+            session["user_id"],
+            medication_ids,
+            request.args.get("date_from"),
+            request.args.get("date_to"),
+        )
+    except ValueError as e:
+        return jsonify(error=str(e)), 400
+
+    db = get_db()
+    owner = db.execute(
+        "SELECT display_name, username FROM users WHERE id = ?",
+        (session["user_id"],),
+    ).fetchone()
+    owner_name = (owner["display_name"] or owner["username"]) if owner else ""
+
+    buffer = build_medication_pdf(intakes, meds_by_id, d_from, d_to, owner_name)
+
+    audit("export_medications_pdf", None, None, {
+        "date_from": d_from, "date_to": d_to,
+        "medication_ids": medication_ids, "intake_count": len(intakes),
+    })
+
+    filename = f"medications_{d_from}_{d_to}.pdf"
+
+    return send_file(
+        buffer,
+        mimetype="application/pdf",
+        as_attachment=False,
         download_name=filename,
     )
 
@@ -1630,28 +1677,28 @@ def wa_login():
 
 @app.errorhandler(400)
 def bad_request_handler(e):
-    if request.path.startswith("/api/") or request.path == "/export.pdf":
+    if request.path.startswith("/api/") or request.path in ("/export.pdf", "/export-medications.pdf"):
         return jsonify(error="Некорректный запрос"), 400
     return "Некорректный запрос", 400
 
 
 @app.errorhandler(401)
 def unauthorized_handler(e):
-    if request.path.startswith("/api/") or request.path == "/export.pdf":
+    if request.path.startswith("/api/") or request.path in ("/export.pdf", "/export-medications.pdf"):
         return jsonify(error="Требуется вход"), 401
     return redirect(url_for("login"))
 
 
 @app.errorhandler(403)
 def forbidden_handler(e):
-    if request.path.startswith("/api/") or request.path == "/export.pdf":
+    if request.path.startswith("/api/") or request.path in ("/export.pdf", "/export-medications.pdf"):
         return jsonify(error="Доступ запрещён"), 403
     return "Доступ запрещён", 403
 
 
 @app.errorhandler(404)
 def not_found_handler(e):
-    if request.path.startswith("/api/") or request.path == "/export.pdf":
+    if request.path.startswith("/api/") or request.path in ("/export.pdf", "/export-medications.pdf"):
         return jsonify(error="Не найдено"), 404
     return "Не найдено", 404
 

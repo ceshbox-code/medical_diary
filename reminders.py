@@ -26,6 +26,7 @@ CSRF-защита и заголовки безопасности действу�
 """
 
 import os
+import re
 import sqlite3
 from datetime import datetime, timedelta, date
 
@@ -44,6 +45,33 @@ reminders_bp = Blueprint("reminders", __name__)
 
 # Единицы дозы — закрытый список, чтобы не копить в базе произвольный текст.
 MED_UNITS = ("мг", "мкг", "г", "мл", "шт", "капли", "ЕД")
+
+# Единицы, которые ЦРПТ пишет иначе, чем у нас в закрытом списке (см. MED_UNITS).
+_MDLP_UNIT_SYNONYMS = {"ме": "ЕД", "ед": "ЕД", "мг": "мг", "мкг": "мкг", "г": "г", "мл": "мл", "шт": "шт", "капли": "капли"}
+
+# Разбирает ТОЛЬКО однозначный вид "число единица" ("500 мг", "250 МЕ").
+# Составные концентрации ("0.25 мг/г", "0.005 %", несколько чисел через
+# дробь) сознательно НЕ трогаем — надёжно превратить их в одну пару
+# value+unit без риска исказить дозу нельзя, поэтому для них возвращаем
+# (None, None), и на фронте доза в этом случае останется только текстовой
+# подсказкой, а не подставленным значением.
+_SIMPLE_DOSE_RE = re.compile(r"^\s*(\d+(?:[.,]\d+)?)\s*([А-Яа-яЁё]+)\.?\s*$")
+
+
+def _parse_simple_mdlp_dose(raw):
+    if not raw:
+        return None, None
+    m = _SIMPLE_DOSE_RE.match(raw)
+    if not m:
+        return None, None
+    unit = _MDLP_UNIT_SYNONYMS.get(m.group(2).lower())
+    if not unit:
+        return None, None
+    try:
+        value = float(m.group(1).replace(",", "."))
+    except ValueError:
+        return None, None
+    return (value, unit) if value > 0 else (None, None)
 
 # Источник записи о лекарстве — закрытый список; всё, что не входит в
 # перечень, тихо становится 'manual' (см. api_medication_create).
@@ -412,17 +440,21 @@ def api_medication_barcode_lookup(gtin):
                         name=row["name"], dose_value=row["dose_value"], dose_unit=row["dose_unit"])
 
     # 2. Официальные открытые данные ЦРПТ (см. import_mdlp_gtins.py).
-    # Дозу отсюда отдаём только как текстовую подсказку (dose_hint) —
-    # формат свободный ("0.25 мг/г", "250 МЕ" и т.п.), надёжно разложить
-    # его в наши value/unit нельзя, а молча подставлять непроверенную
-    # дозу в медицинском контексте небезопасно.
+    # Дозу пытаемся разложить в value+unit, но ТОЛЬКО для однозначных
+    # случаев вида "число единица" ("500 мг"). Составные концентрации
+    # ("0.25 мг/г", "0.005 %" и т.п.) не трогаем — надёжно разложить их без
+    # риска исказить дозу нельзя, а молча подставлять непроверенную дозу в
+    # медицинском контексте небезопасно; для них остаётся только текстовая
+    # подсказка (dose_hint), как и раньше.
     ref = db.execute(
         "SELECT prod_sell_name, dose_raw, form_name FROM mdlp_gtins WHERE gtin = ?",
         (gtin,),
     ).fetchone()
     if ref and ref["prod_sell_name"]:
+        dose_value, dose_unit = _parse_simple_mdlp_dose(ref["dose_raw"])
         return jsonify(found=True, source="mdlp",
-                        name=ref["prod_sell_name"], dose_hint=ref["dose_raw"], form_hint=ref["form_name"])
+                        name=ref["prod_sell_name"], dose_value=dose_value, dose_unit=dose_unit,
+                        dose_hint=ref["dose_raw"], form_hint=ref["form_name"])
 
     return jsonify(found=False)
 

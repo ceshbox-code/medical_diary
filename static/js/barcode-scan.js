@@ -10,31 +10,52 @@
  * ИИ/сервис не проверяет подлинность лекарства и не обращается к ИС МДЛП/
  * «Честный знак» — читается только идентификатор применения 01 (GTIN),
  * серийный номер и криптохвост игнорируются: они для этой задачи не нужны.
+ *
+ * АРХИТЕКТУРА (важно, почему именно так):
+ *
+ * 1) Камера запрашивается ОДИН РАЗ за сессию страницы и переиспользуется
+ *    между сканами (module-level sharedStream). Повторные вызовы
+ *    getUserMedia() в одной вкладке — известный баг WebKit, после
+ *    нескольких запросов камера может перестать выдавать кадры вообще:
+ *    https://bugs.webkit.org/show_bug.cgi?id=204106
+ *    Поток по-настоящему останавливается только при закрытии страницы.
+ *
+ * 2) Декодируем не весь кадр видео, а только вырезанный квадрат по центру
+ *    (область прицеливания) — декодеру физически меньше пикселей разбирать,
+ *    это прямо ускоряет распознавание на плотных кодах (DataMatrix). Метода
+ *    "decodeFromCanvas" в этой сборке нет, поэтому используется низкоуровневая
+ *    связка, которой сама библиотека пользуется внутри себя:
+ *    HTMLCanvasElementLuminanceSource -> BinaryBitmap(HybridBinarizer) ->
+ *    MultiFormatReader.decode(...). Собственный цикл опроса (setTimeout),
+ *    а не decodeOnce* — те методы либо не дают доступа к обрезке кадра,
+ *    либо (см. историю с decodeOnceFromConstraints/reset()) слишком
+ *    непредсказуемо ведут себя при попытке прервать/перезапустить их
+ *    посреди работы.
  */
 (function () {
   'use strict';
 
-  var activeReader = null;
-  var activeVideoId = null;
+  var sharedStream = null;
+  var reader = null;      // один и тот же MultiFormatReader на все сканы — он не хранит состояния потока/камеры
+  var readerHints = null;
+  var currentScan = null; // { timer, canvas, ctx, videoEl, reject } — состояние активного цикла опроса, если есть
 
-  // reset() из библиотеки останавливает только внутренний цикл декодирования,
-  // но не всегда по-настоящему освобождает MediaStream — на iOS Safari это
-  // приводило к тому, что второй скан подряд не мог получить камеру (поток от
-  // первого раза формально ещё "жив"). Поэтому останавливаем треки сами,
-  // не полагаясь только на библиотеку.
-  function releaseCamera() {
-    if (activeReader) {
-      try { activeReader.reset(); } catch (e) { /* не критично */ }
-      activeReader = null;
+  var CROP_FRACTION = 0.80;   // доля меньшей стороны кадра, которую вырезаем под область прицеливания
+  var CROP_CANVAS_SIZE = 360; // сторона рабочего canvas в пикселях — для декодирования этого достаточно
+  var POLL_INTERVAL_MS = 130;
+
+  function streamIsLive(stream) {
+    return !!stream && stream.getVideoTracks().some(function (t) { return t.readyState === 'live'; });
+  }
+
+  function getSharedStream(constraints) {
+    if (streamIsLive(sharedStream)) {
+      return Promise.resolve(sharedStream);
     }
-    if (activeVideoId) {
-      var el = document.getElementById(activeVideoId);
-      if (el && el.srcObject && typeof el.srcObject.getTracks === 'function') {
-        el.srcObject.getTracks().forEach(function (t) { try { t.stop(); } catch (e) { /* не критично */ } });
-        el.srcObject = null;
-      }
-      activeVideoId = null;
-    }
+    return navigator.mediaDevices.getUserMedia(constraints).then(function (stream) {
+      sharedStream = stream;
+      return stream;
+    });
   }
 
   function extractGtin(raw) {
@@ -51,6 +72,51 @@
     return null;
   }
 
+  function getReader() {
+    if (!reader) {
+      reader = new window.ZXing.MultiFormatReader();
+      readerHints = new Map();
+      readerHints.set(window.ZXing.DecodeHintType.POSSIBLE_FORMATS, [
+        window.ZXing.BarcodeFormat.EAN_13,
+        window.ZXing.BarcodeFormat.EAN_8,
+        window.ZXing.BarcodeFormat.UPC_A,
+        window.ZXing.BarcodeFormat.CODE_128,
+        window.ZXing.BarcodeFormat.DATA_MATRIX,
+        window.ZXing.BarcodeFormat.QR_CODE
+      ]);
+      readerHints.set(window.ZXing.DecodeHintType.TRY_HARDER, true);
+      if (typeof reader.setHints === 'function') { reader.setHints(readerHints); }
+    }
+    return reader;
+  }
+
+  // Декодирует один кадр из canvas. Бросает исключение, если код не найден —
+  // это нормальное, ожидаемое состояние почти на каждом кадре, а не ошибка.
+  function decodeCanvasOnce(canvas) {
+    var r = getReader();
+    var luminanceSource = new window.ZXing.HTMLCanvasElementLuminanceSource(canvas);
+    var binaryBitmap = new window.ZXing.BinaryBitmap(new window.ZXing.HybridBinarizer(luminanceSource));
+    return r.decode(binaryBitmap, readerHints);
+  }
+
+  function stopCurrentScan() {
+    if (currentScan) {
+      clearTimeout(currentScan.timer);
+      currentScan = null;
+    }
+  }
+
+  // По-настоящему гасит камеру целиком. Вызывается только при закрытии
+  // страницы — не после каждого скана.
+  function stopSharedStreamFully() {
+    stopCurrentScan();
+    if (sharedStream) {
+      sharedStream.getTracks().forEach(function (t) { try { t.stop(); } catch (e) { /* не критично */ } });
+      sharedStream = null;
+    }
+  }
+  window.addEventListener('pagehide', stopSharedStreamFully);
+
   function scanOnce(videoElementId) {
     if (!window.ZXing) {
       return Promise.reject(new Error('Библиотека сканирования не загружена'));
@@ -58,29 +124,18 @@
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       return Promise.reject(new Error('Камера недоступна в этом браузере'));
     }
-    // На всякий случай гасим предыдущую камеру, если она вдруг ещё не была
-    // отпущена (например, предыдущий вызов не успел корректно завершиться).
-    releaseCamera();
+    var videoEl = document.getElementById(videoElementId);
+    if (!videoEl) {
+      return Promise.reject(new Error('Не найден элемент видео для скана'));
+    }
+    stopCurrentScan(); // на случай, если предыдущий скан почему-то не был остановлен снаружи
 
-    var hints = new Map();
-    hints.set(window.ZXing.DecodeHintType.POSSIBLE_FORMATS, [
-      window.ZXing.BarcodeFormat.EAN_13,
-      window.ZXing.BarcodeFormat.EAN_8,
-      window.ZXing.BarcodeFormat.UPC_A,
-      window.ZXing.BarcodeFormat.CODE_128,
-      window.ZXing.BarcodeFormat.DATA_MATRIX,
-      window.ZXing.BarcodeFormat.QR_CODE
-    ]);
-    // QR (и DataMatrix) требуют заметно более чёткого и крупного кадра,
-    // чем 1D-штрихкод. TRY_HARDER заставляет декодер разбирать кадр
-    // тщательнее (дороже по CPU, но это разовый скан, а не видео-поток).
-    hints.set(window.ZXing.DecodeHintType.TRY_HARDER, true);
-    var reader = new window.ZXing.BrowserMultiFormatReader(hints);
-    activeReader = reader;
-    activeVideoId = videoElementId;
     // Явно просим у камеры разрешение повыше и заднюю камеру — браузер по
     // умолчанию может выдать поток низкого разрешения, которого хватает
-    // для штрихкода, но не хватает для плотного QR/DataMatrix.
+    // для штрихкода, но не хватает для плотного QR/DataMatrix. Реально
+    // применяется только при первом (настоящем) getUserMedia за сессию —
+    // при переиспользовании потока constraints уже не действуют, это
+    // ожидаемо (см. комментарий в начале файла).
     var constraints = {
       video: {
         facingMode: { ideal: 'environment' },
@@ -89,47 +144,70 @@
         advanced: [{ focusMode: 'continuous' }]
       }
     };
-    var decodePromise = (typeof reader.decodeOnceFromConstraints === 'function')
-      ? reader.decodeOnceFromConstraints(constraints, videoElementId)
-      : reader.decodeOnceFromVideoDevice(undefined, videoElementId);
 
-    // Диагностика: какое разрешение камера реально согласовала (а не что мы
-    // попросили в constraints — это лишь пожелание, слабая камера отдаст
-    // максимум, что умеет). Видно только в консоли браузера.
-    var videoEl = document.getElementById(videoElementId);
-    if (videoEl) {
-      var logRealResolution = function () {
-        if (videoEl.videoWidth) {
-          console.debug('[BarcodeScan] реальное разрешение камеры:', videoEl.videoWidth + 'x' + videoEl.videoHeight);
-          videoEl.removeEventListener('loadedmetadata', logRealResolution);
-        }
-      };
-      videoEl.addEventListener('loadedmetadata', logRealResolution);
-    }
-
-    return decodePromise.then(
-      function (result) {
-        releaseCamera();
-        var gtin = extractGtin(result.text);
-        // Диагностика: видно в консоли браузера (F12 -> Console), никуда не
-        // отправляется. Помогает понять, что именно прочитала камера, если
-        // код найден, но лекарство не определилось по базе.
-        console.debug('[BarcodeScan] сырой текст:', result.text, '-> GTIN:', gtin);
-        if (!gtin) { throw new Error('Не удалось определить код товара'); }
-        return gtin;
-      },
-      function (err) {
-        releaseCamera();
-        throw err;
+    return getSharedStream(constraints).then(function (stream) {
+      if (videoEl.srcObject !== stream) {
+        videoEl.srcObject = stream;
       }
-    );
+      var playResult = videoEl.play();
+      if (playResult && typeof playResult.catch === 'function') {
+        playResult.catch(function () { /* "already playing" и т.п. — не критично */ });
+      }
+
+      return new Promise(function (resolve, reject) {
+        var canvas = document.createElement('canvas');
+        canvas.width = CROP_CANVAS_SIZE;
+        canvas.height = CROP_CANVAS_SIZE;
+        var ctx = canvas.getContext('2d', { willReadFrequently: true });
+
+        var loggedResolutionOnce = false;
+
+        function tick() {
+          if (videoEl.readyState < 2 || !videoEl.videoWidth) {
+            currentScan.timer = setTimeout(tick, POLL_INTERVAL_MS);
+            return;
+          }
+          if (!loggedResolutionOnce) {
+            loggedResolutionOnce = true;
+            console.debug('[BarcodeScan] реальное разрешение камеры:', videoEl.videoWidth + 'x' + videoEl.videoHeight);
+          }
+
+          var side = Math.min(videoEl.videoWidth, videoEl.videoHeight) * CROP_FRACTION;
+          var sx = (videoEl.videoWidth - side) / 2;
+          var sy = (videoEl.videoHeight - side) / 2;
+          ctx.drawImage(videoEl, sx, sy, side, side, 0, 0, CROP_CANVAS_SIZE, CROP_CANVAS_SIZE);
+
+          try {
+            var result = decodeCanvasOnce(canvas);
+            var text = (typeof result.getText === 'function') ? result.getText() : result.text;
+            var gtin = extractGtin(text);
+            if (gtin) {
+              console.debug('[BarcodeScan] сырой текст:', text, '-> GTIN:', gtin);
+              currentScan = null;
+              resolve(gtin);
+              return;
+            }
+            // Текст декодировался, но не похож на GTIN — редкий случай
+            // (например, отсканировали что-то постороннее), пробуем дальше.
+          } catch (e) {
+            // Ожидаемо почти на каждом кадре, пока код не попал в кадр
+            // ровно и чётко — не логируем, чтобы не спамить консоль.
+          }
+          currentScan.timer = setTimeout(tick, POLL_INTERVAL_MS);
+        }
+
+        currentScan = { timer: null, reject: reject };
+        tick();
+      });
+    });
   }
 
   // Вызывается извне (meds.js) при закрытии модалки сканирования любым
-  // способом (кнопка «Отмена», клик по фону, Escape) — гасит камеру, даже
-  // если сканирование ещё не завершилось.
+  // способом (кнопка «Отмена», клик по фону, Escape) — останавливает цикл
+  // опроса. Сам поток камеры не гасит намеренно — см. комментарий в начале
+  // файла про баг WebKit с повторным getUserMedia.
   function cancel() {
-    releaseCamera();
+    stopCurrentScan();
   }
 
   window.BarcodeScan = { scanOnce: scanOnce, cancel: cancel, extractGtin: extractGtin };

@@ -102,7 +102,7 @@
 
   /* ------------------------------------------------------- модальные окна */
 
-  var MODALS = ['med-modal', 'rem-modal', 'intake-modal', 'barcode-scan-modal'];
+  var MODALS = ['med-modal', 'rem-modal', 'intake-modal', 'barcode-scan-modal', 'med-export-modal'];
   function openModal(id) { $(id).hidden = false; document.body.style.overflow = 'hidden'; }
   function closeModal(id) {
     var m = $(id);
@@ -561,8 +561,17 @@
         toast('Название и доза подставлены из вашего справочника — проверьте перед сохранением', true);
       } else if (found.found && found.source === 'mdlp') {
         $('med-name').value = found.name;
-        var hint = found.dose_hint ? (' Доза по данным маркировки: ' + found.dose_hint + '.') : '';
-        toast('Название подставлено из открытых данных «Честного знака».' + hint + ' Впишите дозу и проверьте название перед сохранением', true);
+        if (found.dose_value !== null && found.dose_value !== undefined) {
+          $('med-dose').value = fmtNum(found.dose_value);
+          if (found.dose_unit) { $('med-unit').value = found.dose_unit; }
+          toast('Название и доза подставлены из открытых данных «Честного знака» — проверьте перед сохранением', true);
+        } else {
+          // Доза в источнике составная ("0.25 мг/г" и т.п.) — надёжно
+          // разложить в число+единицу нельзя, показываем как подсказку,
+          // пользователь переносит её в поле сам.
+          var hint = found.dose_hint ? (' Доза по данным маркировки: ' + found.dose_hint + '.') : '';
+          toast('Название подставлено из открытых данных «Честного знака».' + hint + ' Впишите дозу и проверьте название перед сохранением', true);
+        }
       } else {
         toast('Код не найден ни в вашем справочнике, ни в открытых данных — введите название, оно запомнится', true);
       }
@@ -742,6 +751,37 @@
     }
   }
 
+  function openMedExportModal() {
+    var today = new Date();
+    var from = new Date(today);
+    from.setDate(from.getDate() - 30);
+    $('med-export-from').value = from.toISOString().slice(0, 10);
+    $('med-export-to').value = today.toISOString().slice(0, 10);
+    $('med-export-all').checked = true;
+
+    var list = $('med-export-list');
+    clear(list);
+    if (!state.meds.length) {
+      list.appendChild(h('div', 'muted', 'Список лекарств пуст.'));
+    } else {
+      state.meds.forEach(function (m) {
+        var row = h('label', 'switch-row');
+        row.appendChild(h('span', null, m.name + (m.is_active ? '' : ' (неактивно)')));
+        var cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.className = 'med-export-cb';
+        cb.value = m.id;
+        cb.checked = true;
+        row.appendChild(cb);
+        row.appendChild(h('span', 'switch'));
+        list.appendChild(row);
+      });
+    }
+
+    setMsg('med-export-msg', '', true);
+    openModal('med-export-modal');
+  }
+
   /* --------------------------------------------------------- привязка событий */
 
   $('med-add-btn').addEventListener('click', function () { openMedModal(null); });
@@ -764,6 +804,30 @@
     $('meds-inactive-toggle').addEventListener('click', function () {
       state.medsInactiveOpen = !state.medsInactiveOpen;
       renderMeds();
+    });
+  }
+  if ($('med-export-btn')) { $('med-export-btn').addEventListener('click', openMedExportModal); }
+  if ($('med-export-all')) {
+    $('med-export-all').addEventListener('change', function (e) {
+      var checked = e.target.checked;
+      Array.prototype.slice.call(document.querySelectorAll('.med-export-cb')).forEach(function (cb) { cb.checked = checked; });
+    });
+  }
+  if ($('med-export-submit')) {
+    $('med-export-submit').addEventListener('click', function () {
+      var from = $('med-export-from').value;
+      var to = $('med-export-to').value;
+      if (!from || !to) { setMsg('med-export-msg', 'Укажите обе даты', false); return; }
+      var ids = Array.prototype.slice.call(document.querySelectorAll('.med-export-cb:checked')).map(function (cb) { return cb.value; });
+      if (!ids.length) { setMsg('med-export-msg', 'Выберите хотя бы одно лекарство', false); return; }
+      var allSelected = ids.length === state.meds.length;
+      var url = '/export-medications.pdf?date_from=' + encodeURIComponent(from) + '&date_to=' + encodeURIComponent(to)
+        + (allSelected ? '' : '&medication_ids=' + encodeURIComponent(ids.join(',')));
+      closeModal('med-export-modal');
+      // Переиспользуем тот же вьюер PDF, что и для истории измерений
+      // (app.js): те же кнопки масштаба/скачивания/шаринга/закрытия.
+      currentExportUrl = url;
+      openPdfViewer();
     });
   }
   if ($('med-name')) {
